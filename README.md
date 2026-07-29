@@ -12,7 +12,9 @@ Typed [DCC-MCP](https://github.com/dcc-mcp/dcc-mcp-core) adapter for
 Audiokinetic Wwise Authoring. It connects to Wwise's official loopback WAAPI
 endpoint, binds discovery to the concrete Wwise process, and exposes
 progressively loaded tools for project inspection, Sound SFX and Music Segment
-imports, Events, properties, saves, and bounded audible previews.
+imports, Events, properties, SoundBank generation, saves, and bounded audible
+previews. While the adapter is connected, Wwise also exposes a session-scoped
+**DCC-MCP** menu for the project repository and playable audio showcase.
 
 ## Quick start
 

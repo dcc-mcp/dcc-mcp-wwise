@@ -30,5 +30,8 @@ dcc-mcp-cli describe <returned-tool-slug>
 dcc-mcp-cli call <returned-tool-slug> --json '{}'
 ```
 
+The running adapter adds a session-scoped **DCC-MCP** menu to Wwise. The menu is
+removed when the adapter stops and does not modify Wwise's user configuration.
+
 If multiple Wwise processes are open, pass the PID whose window title contains
 the intended project. The adapter never chooses arbitrarily between them.

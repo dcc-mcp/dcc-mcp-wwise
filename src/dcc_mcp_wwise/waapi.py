@@ -28,10 +28,13 @@ def _client_type():
 def connect_waapi(url: str | None = None) -> Iterator[Any]:
     resolved = resolve_waapi_url(url)
     try:
-        with _client_type()(resolved, allow_exception=True) as client:
-            yield client
+        client = _client_type()(resolved, allow_exception=True)
     except Exception as exc:
         raise RuntimeError(f"WAAPI connection failed for {resolved}: {exc}") from exc
+    try:
+        yield client
+    finally:
+        client.disconnect()
 
 
 def call_waapi(

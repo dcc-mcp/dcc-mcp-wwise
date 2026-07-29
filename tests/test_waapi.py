@@ -19,6 +19,9 @@ class FakeClient:
     def __exit__(self, *_args):
         return None
 
+    def disconnect(self):
+        return True
+
     def call(self, uri, arguments, options):
         self.calls.append((self.url, uri, arguments, options))
         return {"version": {"displayName": "2024.1.1"}}
@@ -41,6 +44,16 @@ def test_call_waapi_uses_official_client_and_explicit_options(monkeypatch):
             {"return": ["name"]},
         )
     ]
+
+
+def test_call_error_is_not_misreported_as_connection_failure(monkeypatch):
+    class FailingClient(FakeClient):
+        def call(self, uri, arguments, options):
+            raise ValueError("bad arguments")
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: FailingClient)
+    with pytest.raises(RuntimeError, match=r"^WAAPI call failed"):
+        waapi.call_waapi("ak.wwise.core.soundbank.generate")
 
 
 def _preview_module():
