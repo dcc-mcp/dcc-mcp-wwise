@@ -4,9 +4,9 @@ These deterministic 48 kHz, 16-bit stereo WAV assets are generated with only
 the Python standard library, then imported, organized, adjusted, previewed, and
 saved in the bundled Wwise project through `dcc-mcp-wwise` typed tools.
 
-- [UI confirm sound](ui-confirm.wav)
-- [Sci-fi impact sound](sci-fi-impact.wav)
-- [Neon Circuit background music](neon-circuit-bgm.wav)
+- [▶ Play UI Confirm](https://dcc-mcp.github.io/showcase/wwise#ui-confirm) · [WAV](ui-confirm.wav)
+- [▶ Play Sci-Fi Impact](https://dcc-mcp.github.io/showcase/wwise#sci-fi-impact) · [WAV](sci-fi-impact.wav)
+- [▶ Play Neon Circuit BGM](https://dcc-mcp.github.io/showcase/wwise#neon-circuit-bgm) · [WAV](neon-circuit-bgm.wav)
 
 | Asset | Duration | Integrated loudness | True peak | SHA-256 |
 | --- | ---: | ---: | ---: | --- |

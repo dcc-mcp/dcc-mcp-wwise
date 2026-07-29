@@ -1,5 +1,13 @@
 # dcc-mcp-wwise
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dcc-mcp-wwise-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/dcc-mcp-wwise.svg">
+    <img src="docs/assets/dcc-mcp-wwise.svg" alt="DCC-MCP · WWISE" width="600">
+  </picture>
+</p>
+
 Typed [DCC-MCP](https://github.com/dcc-mcp/dcc-mcp-core) adapter for
 Audiokinetic Wwise Authoring. It connects to Wwise's official loopback WAAPI
 endpoint, binds discovery to the concrete Wwise process, and exposes
@@ -29,6 +37,12 @@ dcc-mcp-cli call <returned-tool-slug> --json '{}'
 
 See [install.md](install.md) for setup and
 [showcase/audio/README.md](showcase/audio/README.md) for the reproducible audio showcase.
+
+## Audio showcase
+
+- [▶ Play UI Confirm](https://dcc-mcp.github.io/showcase/wwise#ui-confirm)
+- [▶ Play Sci-Fi Impact](https://dcc-mcp.github.io/showcase/wwise#sci-fi-impact)
+- [▶ Play Neon Circuit BGM](https://dcc-mcp.github.io/showcase/wwise#neon-circuit-bgm)
 
 ## Runtime shape
 
