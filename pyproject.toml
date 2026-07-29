@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dcc-mcp-wwise"
+version = "0.1.0"
+description = "Typed DCC-MCP adapter for Audiokinetic Wwise authoring through WAAPI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "loonghao", email = "hal.long@outlook.com" }]
+keywords = ["wwise", "waapi", "audio", "mcp", "dcc", "model-context-protocol"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+  "dcc-mcp-core>=0.19.86,<1.0.0",
+  "waapi-client>=0.8.1,<1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/dcc-mcp/dcc-mcp-wwise"
+Repository = "https://github.com/dcc-mcp/dcc-mcp-wwise"
+Issues = "https://github.com/dcc-mcp/dcc-mcp-wwise/issues"
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.8", "twine>=6"]
+
+[project.scripts]
+dcc-mcp-wwise = "dcc_mcp_wwise.server:main"
+
+[project.entry-points."dcc_mcp.adapters"]
+wwise = "dcc_mcp_wwise:WwiseMcpServer"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dcc_mcp_wwise"]
+artifacts = ["src/dcc_mcp_wwise/skills/**"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/dcc_mcp_wwise",
+  "tests",
+  "tools",
+  "README.md",
+  "install.md",
+  "LICENSE",
+  "release-please-config.json",
+  ".release-please-manifest.json",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

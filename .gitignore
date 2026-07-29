@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv*/
+build/
+dist/
+showcase/evidence/*.log
+
+# Local validation projects are not distributable showcase assets.
+showcase/wwise-project/

@@ -1,0 +1,91 @@
+tools:
+  - name: ping
+    description: Verify WAAPI connectivity and return Wwise version metadata.
+    source_file: scripts/ping.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+
+  - name: get_project_info
+    description: Return the active Wwise project path, platforms, languages, and directories.
+    source_file: scripts/get_project_info.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [wwise_project__ping]
+  - name: query_objects
+    description: Query a bounded set of Wwise objects using WAQL and explicit return fields.
+    source_file: scripts/query_objects.py
+    input_schema:
+      type: object
+      required: [waql]
+      properties:
+        waql:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: WAQL expression, for example `from type sound`.
+        return_fields:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 128}
+          default: [id, name, type, path]
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments:
+          waql: "from type sound"
+          return_fields: [id, name, type, path, audioSource:playbackDuration]
+        note: List authored sounds and their playback durations.
+    next-tools:
+      on-failure: [wwise_project__ping, wwise_project__get_project_info]
+
+  - name: save_project
+    description: Save the current Wwise project and all dirty Work Units.
+    source_file: scripts/save_project.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-success: [wwise_project__get_project_info]
+      on-failure: [wwise_project__ping]

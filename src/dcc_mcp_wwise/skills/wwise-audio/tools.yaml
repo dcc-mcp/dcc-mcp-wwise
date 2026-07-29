@@ -1,0 +1,192 @@
+tools:
+  - name: import_sfx
+    description: Import one existing WAV file as a Sound SFX under the default Actor-Mixer Work Unit.
+    source_file: scripts/import_sfx.py
+    input_schema:
+      type: object
+      required: [audio_file, name]
+      properties:
+        audio_file:
+          type: string
+          minLength: 1
+          description: Existing absolute WAV file path visible to Wwise.
+        name: {type: string, minLength: 1, maxLength: 128}
+        folder: {type: string, minLength: 1, maxLength: 128, default: DCC MCP Showcase}
+        import_operation:
+          type: string
+          enum: [createNew, useExisting, replaceExisting]
+          default: useExisting
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 120
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: true
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          audio_file: "C:/audio/ui-confirm.wav"
+          name: UI Confirm
+          folder: DCC MCP Showcase
+          import_operation: useExisting
+        note: Import one reusable UI sound effect.
+    next-tools:
+      on-success: [wwise_audio__create_play_event, wwise_audio__preview_object]
+      on-failure: [wwise_project__ping, wwise_project__get_project_info]
+
+  - name: import_music_segment
+    description: Import one existing WAV file into a named Music Segment in the default Interactive Music Work Unit.
+    source_file: scripts/import_music_segment.py
+    input_schema:
+      type: object
+      required: [audio_file, segment_name]
+      properties:
+        audio_file:
+          type: string
+          minLength: 1
+          description: Existing absolute WAV file path visible to Wwise.
+        segment_name: {type: string, minLength: 1, maxLength: 128}
+        on_name_conflict:
+          type: string
+          enum: [fail, merge, rename]
+          default: merge
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 120
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: true
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          audio_file: "C:/audio/neon-circuit-loop.wav"
+          segment_name: Neon Circuit Loop
+          on_name_conflict: merge
+        note: Create a playable background-music segment from one stereo WAV.
+    next-tools:
+      on-success: [wwise_audio__create_play_event, wwise_audio__preview_object]
+      on-failure: [wwise_project__ping, wwise_project__get_project_info]
+
+  - name: create_play_event
+    description: Create a named Event with a Play Action targeting an existing Wwise object path.
+    source_file: scripts/create_play_event.py
+    input_schema:
+      type: object
+      required: [event_name, target]
+      properties:
+        event_name: {type: string, minLength: 1, maxLength: 128}
+        target:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Existing Actor-Mixer or Interactive Music object path.
+        folder: {type: string, minLength: 1, maxLength: 128, default: DCC MCP Showcase}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments:
+          event_name: Play_UI_Confirm
+          target: "\\Actor-Mixer Hierarchy\\Default Work Unit\\DCC MCP Showcase\\UI Confirm"
+          folder: DCC MCP Showcase
+        note: Create one Play Event for an imported Sound SFX.
+    next-tools:
+      on-success: [wwise_project__save_project, wwise_audio__preview_object]
+      on-failure: [wwise_project__query_objects]
+
+  - name: set_object_property
+    description: Set one named property on an existing Wwise object.
+    source_file: scripts/set_object_property.py
+    input_schema:
+      type: object
+      required: [object, property, value]
+      properties:
+        object:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Wwise GUID, qualified name, or project path.
+        property: {type: string, minLength: 1, maxLength: 128}
+        value:
+          description: Boolean, number, or string accepted by the Wwise property.
+        platform: {type: string, minLength: 1, maxLength: 128}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments:
+          object: "\\Actor-Mixer Hierarchy\\Default Work Unit\\DCC MCP Showcase\\UI Confirm"
+          property: Volume
+          value: -2.0
+        note: Trim one imported sound by two decibels.
+    next-tools:
+      on-success: [wwise_audio__preview_object, wwise_project__save_project]
+      on-failure: [wwise_project__query_objects]
+
+  - name: preview_object
+    description: Play a Wwise object in Authoring through a bounded, connection-scoped transport.
+    source_file: scripts/preview_object.py
+    input_schema:
+      type: object
+      required: [object]
+      properties:
+        object:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Playable Wwise object GUID, qualified name, or project path.
+        duration_secs:
+          type: number
+          minimum: 0.25
+          maximum: 30
+          default: 3
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 40
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          object: "\\Events\\Default Work Unit\\DCC MCP Showcase\\Play_UI_Confirm"
+          duration_secs: 2
+        note: Audition one Event through a temporary WAAPI connection.
+    next-tools:
+      on-failure: [wwise_project__query_objects, wwise_project__ping]
