@@ -70,6 +70,24 @@ def _sci_fi_impact() -> list[tuple[float, float]]:
     return frames
 
 
+def _footstep(duration: float, seed: int, body_frequency: float) -> list[tuple[float, float]]:
+    rng = random.Random(seed)
+    frames = []
+    for index in range(round(duration * SAMPLE_RATE)):
+        time = index / SAMPLE_RATE
+        body = math.sin(2 * math.pi * (body_frequency - 22 * time) * time) * math.exp(-15 * time)
+        grit = (rng.random() * 2 - 1) * math.exp(-24 * time)
+        sole = math.sin(2 * math.pi * 820 * time) * math.exp(-34 * time)
+        envelope = _envelope(time, duration, 0.0015, 0.06)
+        frames.append(
+            (
+                0.78 * envelope * (0.72 * body + 0.26 * grit + 0.08 * sole),
+                0.78 * envelope * (0.68 * body + 0.22 * grit - 0.07 * sole),
+            )
+        )
+    return frames
+
+
 def _neon_circuit_bgm() -> list[tuple[float, float]]:
     duration = 12.0
     beat = 0.5
@@ -113,6 +131,9 @@ def generate(output_dir: Path) -> list[Path]:
         "ui-confirm.wav": _ui_confirm(),
         "sci-fi-impact.wav": _sci_fi_impact(),
         "neon-circuit-bgm.wav": _neon_circuit_bgm(),
+        "footstep-01.wav": _footstep(0.34, 101, 92),
+        "footstep-02.wav": _footstep(0.37, 202, 84),
+        "footstep-03.wav": _footstep(0.32, 303, 101),
     }
     paths = []
     for name, frames in assets.items():
