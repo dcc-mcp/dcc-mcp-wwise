@@ -39,6 +39,7 @@ def test_direct_mcp_can_discover_and_load_project_skill(monkeypatch, tmp_path):
     monkeypatch.setenv("DCC_MCP_DISABLE_DEFAULT_SKILL_PATHS", "1")
     monkeypatch.setattr(waapi, "get_wwise_version", lambda _url=None: "v2024.1.1")
     monkeypatch.setattr(waapi, "is_connected", lambda _url=None: True)
+    monkeypatch.setattr(server.WwiseMenu, "start", lambda _self: None)
 
     instance = server.WwiseMcpServer(port=0, host_pid=os.getpid())
     instance.register_builtin_actions()

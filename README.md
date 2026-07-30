@@ -12,7 +12,11 @@ Typed [DCC-MCP](https://github.com/dcc-mcp/dcc-mcp-core) adapter for
 Audiokinetic Wwise Authoring. It connects to Wwise's official loopback WAAPI
 endpoint, binds discovery to the concrete Wwise process, and exposes
 progressively loaded tools for project inspection, Sound SFX and Music Segment
-imports, Events, properties, saves, and bounded audible previews.
+imports, Random/Sequence Containers, Events, properties and references,
+connected-game profiler snapshots, SoundBank generation, saves, and bounded
+audible previews. While the adapter is connected, Wwise also exposes a
+session-scoped **DCC-MCP** menu for the project repository and playable audio
+showcase.
 
 ## Quick start
 
@@ -32,7 +36,7 @@ dcc-mcp-cli list
 dcc-mcp-cli search --query "Wwise project info" --dcc-type wwise
 dcc-mcp-cli load-skill wwise-project --dcc-type wwise
 dcc-mcp-cli describe <returned-tool-slug>
-dcc-mcp-cli call <returned-tool-slug> --json '{}'
+dcc-mcp-cli call <returned-tool-slug> --json '{}' --wait
 ```
 
 See [install.md](install.md) for setup and
@@ -43,6 +47,11 @@ See [install.md](install.md) for setup and
 - [▶ Play UI Confirm](https://dcc-mcp.github.io/showcase/wwise#ui-confirm)
 - [▶ Play Sci-Fi Impact](https://dcc-mcp.github.io/showcase/wwise#sci-fi-impact)
 - [▶ Play Neon Circuit BGM](https://dcc-mcp.github.io/showcase/wwise#neon-circuit-bgm)
+- [Footstep variation source WAVs](showcase/audio/README.md#gameplay-footstep-variations)
+
+The footstep example batch-imports three deterministic WAVs into a step-mode
+Random Container, assigns its Output Bus, creates and previews
+`Play_Footsteps`, then generates a Windows `Gameplay` SoundBank.
 
 ## Runtime shape
 

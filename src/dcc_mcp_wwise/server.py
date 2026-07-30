@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import logging
 import os
 import signal
 import subprocess
@@ -20,8 +21,10 @@ from dcc_mcp_core.server_base import DccServerBase
 from . import waapi
 from .__version__ import __version__
 from .dispatcher import WwiseWaapiDispatcher
+from .menu import WwiseMenu
 
 _server: Optional["WwiseMcpServer"] = None
+_LOGGER = logging.getLogger(__name__)
 
 
 def _detect_wwise_pids() -> list[int]:
@@ -141,16 +144,24 @@ class WwiseMcpServer(DccServerBase):
         self._readiness = AdapterReadinessBinder(self)
         self._readiness_stop = threading.Event()
         self._readiness_thread: threading.Thread | None = None
+        self._menu = WwiseMenu(resolved_url)
         self._set_waapi_readiness(False)
 
     def start(self, **kwargs: Any) -> Any:
         handle = super().start(**kwargs)
         self._start_readiness_monitor()
+        try:
+            self._menu.start()
+        except RuntimeError as exc:
+            _LOGGER.warning("Wwise started without the DCC-MCP menu: %s", exc)
         return handle
 
     def stop(self) -> None:
-        self._stop_readiness_monitor()
-        super().stop()
+        try:
+            self._menu.stop()
+        finally:
+            self._stop_readiness_monitor()
+            super().stop()
 
     def _set_waapi_readiness(self, ready: bool) -> None:
         self._readiness.mark_dispatcher_ready(

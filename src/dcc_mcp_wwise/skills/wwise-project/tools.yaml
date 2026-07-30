@@ -71,6 +71,117 @@ tools:
     next-tools:
       on-failure: [wwise_project__ping, wwise_project__get_project_info]
 
+  - name: get_selected_objects
+    description: Return the objects currently selected in the active Wwise Authoring view.
+    source_file: scripts/get_selected_objects.py
+    input_schema:
+      type: object
+      properties:
+        return_fields:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 128}
+          default: [id, name, type, path]
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 10
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    next-tools:
+      on-failure: [wwise_project__ping]
+
+  - name: get_runtime_profile
+    description: Return a bounded voice and loaded-media snapshot from the connected game Sound Engine profiler.
+    source_file: scripts/get_runtime_profile.py
+    input_schema:
+      type: object
+      properties:
+        cursor: {type: string, enum: [capture, user], default: capture}
+        max_items: {type: integer, minimum: 1, maximum: 500, default: 100}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: true
+      deferred_hint: false
+    call_examples:
+      - arguments: {cursor: capture, max_items: 100}
+        note: Inspect active voices and loaded media at the latest capture cursor.
+    next-tools:
+      on-failure: [wwise_project__ping]
+
+  - name: generate_soundbank
+    description: Generate one existing or temporary Wwise SoundBank for selected events and platforms.
+    source_file: scripts/generate_soundbank.py
+    input_schema:
+      type: object
+      required: [soundbank]
+      properties:
+        soundbank: {type: string, minLength: 1, maxLength: 128}
+        events:
+          type: array
+          maxItems: 256
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 1024}
+          description: Event GUIDs, qualified names, or Wwise project paths. Omit for an existing SoundBank.
+        inclusions:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items: {type: string, enum: [event, structure, media]}
+          default: [event, structure, media]
+        platforms:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 128}
+        languages:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 128}
+        skip_languages: {type: boolean, default: false}
+        rebuild: {type: boolean, default: false}
+        write_to_disk: {type: boolean, default: true}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 600
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: true
+      open_world_hint: true
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          soundbank: Gameplay
+          events: ['\Events\Default Work Unit\Gameplay\Play_UI_Confirm']
+          platforms: [Windows]
+          write_to_disk: true
+        note: Generate one SoundBank from an authored Event for Windows.
+    next-tools:
+      on-failure: [wwise_project__query_objects, wwise_project__get_project_info]
+
   - name: save_project
     description: Save the current Wwise project and all dirty Work Units.
     source_file: scripts/save_project.py

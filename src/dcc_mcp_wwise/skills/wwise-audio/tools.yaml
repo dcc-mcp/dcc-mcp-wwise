@@ -40,6 +40,58 @@ tools:
       on-success: [wwise_audio__create_play_event, wwise_audio__preview_object]
       on-failure: [wwise_project__ping, wwise_project__get_project_info]
 
+  - name: import_variation_container
+    description: Import 2-32 WAV files into one Random or Sequence Container for game-ready variation playback.
+    source_file: scripts/import_variation_container.py
+    input_schema:
+      type: object
+      required: [container_name, audio_files]
+      properties:
+        container_name: {type: string, minLength: 1, maxLength: 128}
+        audio_files:
+          type: array
+          minItems: 2
+          maxItems: 32
+          items:
+            type: object
+            required: [audio_file, name]
+            properties:
+              audio_file:
+                type: string
+                minLength: 1
+                description: Existing absolute WAV file path visible to Wwise.
+              name: {type: string, minLength: 1, maxLength: 128}
+            additionalProperties: false
+        folder: {type: string, minLength: 1, maxLength: 128, default: DCC MCP Showcase}
+        mode: {type: string, enum: [random, sequence], default: random}
+        play_mode: {type: string, enum: [continuous, step], default: step}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 180
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: true
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          container_name: Footsteps
+          audio_files:
+            - {audio_file: "C:/audio/footstep-01.wav", name: Footstep 01}
+            - {audio_file: "C:/audio/footstep-02.wav", name: Footstep 02}
+          folder: Gameplay
+          mode: random
+          play_mode: step
+        note: Build one random footstep container in a single WAAPI object-set operation.
+    next-tools:
+      on-success: [wwise_audio__create_play_event, wwise_audio__set_object_reference]
+      on-failure: [wwise_project__ping, wwise_project__get_project_info]
+
   - name: import_music_segment
     description: Import one existing WAV file into a named Music Segment in the default Interactive Music Work Unit.
     source_file: scripts/import_music_segment.py
@@ -149,6 +201,47 @@ tools:
           property: Volume
           value: -2.0
         note: Trim one imported sound by two decibels.
+    next-tools:
+      on-success: [wwise_audio__preview_object, wwise_project__save_project]
+      on-failure: [wwise_project__query_objects]
+
+  - name: set_object_reference
+    description: Set one named Wwise object reference, such as OutputBus or Attenuation.
+    source_file: scripts/set_object_reference.py
+    input_schema:
+      type: object
+      required: [object, reference, value]
+      properties:
+        object:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Wwise GUID, qualified name, or project path.
+        reference: {type: string, minLength: 1, maxLength: 128}
+        value:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Referenced Wwise GUID, qualified name, or project path.
+        platform: {type: string, minLength: 1, maxLength: 128}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments:
+          object: "\\Actor-Mixer Hierarchy\\Default Work Unit\\Gameplay\\Footsteps"
+          reference: OutputBus
+          value: "\\Master-Mixer Hierarchy\\Default Work Unit\\Master Audio Bus\\SFX"
+        note: Route a gameplay container to an existing SFX bus.
     next-tools:
       on-success: [wwise_audio__preview_object, wwise_project__save_project]
       on-failure: [wwise_project__query_objects]
