@@ -167,6 +167,124 @@ tools:
       on-success: [wwise_project__save_project, wwise_audio__preview_object]
       on-failure: [wwise_project__query_objects]
 
+  - name: author_switch_container
+    description: Author a Switch or State group and bind 2-32 WAV variants to an SFX or Music Switch Container.
+    source_file: scripts/author_switch_container.py
+    input_schema:
+      type: object
+      required: [container_name, group_name, variants]
+      properties:
+        container_name: {type: string, minLength: 1, maxLength: 128}
+        group_name: {type: string, minLength: 1, maxLength: 128}
+        variants:
+          type: array
+          minItems: 2
+          maxItems: 32
+          items:
+            type: object
+            required: [value, audio_file]
+            properties:
+              value: {type: string, minLength: 1, maxLength: 128}
+              name: {type: string, minLength: 1, maxLength: 128}
+              audio_file:
+                type: string
+                minLength: 1
+                description: Existing absolute WAV file path visible to Wwise.
+            additionalProperties: false
+        game_sync_kind: {type: string, enum: [switch, state], default: switch}
+        content_kind: {type: string, enum: [sfx, music], default: sfx}
+        folder: {type: string, minLength: 1, maxLength: 128, default: Gameplay}
+        default_value: {type: string, minLength: 1, maxLength: 128}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: true
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          container_name: RPG Music
+          group_name: Game Mode
+          game_sync_kind: state
+          content_kind: music
+          folder: RPG
+          default_value: Exploration
+          variants:
+            - {value: Exploration, audio_file: "C:/audio/rpg-exploration.wav"}
+            - {value: Combat, audio_file: "C:/audio/rpg-combat.wav"}
+        note: Author state-driven exploration and combat music with explicit assignments.
+    next-tools:
+      on-success: [wwise_audio__configure_rtpc_curve, wwise_audio__create_play_event]
+      on-failure: [wwise_project__query_objects, wwise_project__get_project_info]
+
+  - name: configure_rtpc_curve
+    description: Create a Game Parameter and append one validated RTPC property curve to an existing Wwise object.
+    source_file: scripts/configure_rtpc_curve.py
+    input_schema:
+      type: object
+      required: [target, parameter_name, property, minimum, maximum, initial, points]
+      properties:
+        target:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Existing Wwise object GUID, qualified name, or project path.
+        parameter_name: {type: string, minLength: 1, maxLength: 128}
+        parameter_folder: {type: string, minLength: 1, maxLength: 128, default: Gameplay}
+        property: {type: string, minLength: 1, maxLength: 128}
+        minimum: {type: number}
+        maximum: {type: number}
+        initial: {type: number}
+        points:
+          type: array
+          minItems: 2
+          maxItems: 64
+          items:
+            type: object
+            required: [x, y]
+            properties:
+              x: {type: number}
+              y: {type: number}
+              shape:
+                type: string
+                enum: [Constant, Linear, Log3, Log2, Log1, InvertedSCurve, SCurve, Exp1, Exp2, Exp3]
+                default: Linear
+            additionalProperties: false
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 60
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: false
+      deferred_hint: false
+    call_examples:
+      - arguments:
+          target: "\\Interactive Music Hierarchy\\Default Work Unit\\RPG\\RPG Music"
+          parameter_name: Combat Intensity
+          property: Volume
+          minimum: 0
+          maximum: 100
+          initial: 0
+          points:
+            - {x: 0, y: -12, shape: Linear}
+            - {x: 100, y: 0, shape: SCurve}
+        note: Drive RPG music volume with a bounded combat-intensity RTPC.
+    next-tools:
+      on-success: [wwise_audio__preview_object, wwise_project__save_project]
+      on-failure: [wwise_project__query_objects]
+
   - name: set_object_property
     description: Set one named property on an existing Wwise object.
     source_file: scripts/set_object_property.py

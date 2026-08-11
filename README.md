@@ -13,8 +13,9 @@ Audiokinetic Wwise Authoring. It connects to Wwise's official loopback WAAPI
 endpoint, binds discovery to the concrete Wwise process, and exposes
 progressively loaded tools for project inspection, Sound SFX and Music Segment
 imports, Random/Sequence Containers, Events, properties and references,
-connected-game profiler snapshots, SoundBank generation, saves, and bounded
-audible previews. While the adapter is connected, Wwise also exposes a
+Switch/State-driven SFX and music, RTPC curves, connected-game profiler
+sessions, SoundBank/ProjectInfo reconciliation, Work Unit source control,
+saves, and bounded audible previews. While the adapter is connected, Wwise also exposes a
 session-scoped **DCC-MCP** menu for the project repository and playable audio
 showcase.
 
@@ -52,6 +53,11 @@ See [install.md](install.md) for setup and
 The footstep example batch-imports three deterministic WAVs into a step-mode
 Random Container, assigns its Output Bus, creates and previews
 `Play_Footsteps`, then generates a Windows `Gameplay` SoundBank.
+
+The installable `wwise-audio` Skill also contains an
+[end-to-end RPG workflow](src/dcc_mcp_wwise/skills/wwise-audio/references/RPG_GAME_AUDIO_WORKFLOW.md)
+for dynamic music, surface Switches, RTPCs, Events, engine handoff, profiling,
+and team source control.
 
 ## Runtime shape
 

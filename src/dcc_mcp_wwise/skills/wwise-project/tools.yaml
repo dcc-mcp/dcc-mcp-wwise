@@ -125,6 +125,85 @@ tools:
     next-tools:
       on-failure: [wwise_project__ping]
 
+  - name: runtime_session
+    description: List or connect Sound Engine targets and start or stop the official Wwise profiler capture session.
+    source_file: scripts/runtime_session.py
+    input_schema:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [list, connect, disconnect, start_capture, stop_capture]
+        host:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Host string returned by list; required only for connect.
+        app_name: {type: string, minLength: 1, maxLength: 256}
+        command_port: {type: integer, minimum: 1, maximum: 65535}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+      open_world_hint: true
+      deferred_hint: false
+    call_examples:
+      - arguments: {action: list}
+        note: Discover available local or remote game Sound Engine targets before connecting.
+    next-tools:
+      on-success: [wwise_project__get_runtime_profile]
+      on-failure: [wwise_project__ping]
+
+  - name: source_control_files
+    description: Run one bounded official Wwise source-control action on explicit absolute Work Unit file paths.
+    source_file: scripts/source_control_files.py
+    input_schema:
+      type: object
+      required: [action, files]
+      properties:
+        action: {type: string, enum: [status, checkout, add, revert, commit]}
+        files:
+          type: array
+          minItems: 1
+          maxItems: 256
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            description: Absolute Wwise project or Work Unit file path.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: Required only for commit.
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 120
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: false
+      open_world_hint: true
+      deferred_hint: true
+    call_examples:
+      - arguments:
+          action: status
+          files: ["C:/Game/AudioProject/Actor-Mixer Hierarchy/Default Work Unit.wwu"]
+        note: Inspect explicit Work Unit status before any mutating source-control action.
+    next-tools:
+      on-failure: [wwise_project__get_project_info]
+
   - name: generate_soundbank
     description: Generate one existing or temporary Wwise SoundBank for selected events and platforms.
     source_file: scripts/generate_soundbank.py
@@ -181,6 +260,38 @@ tools:
         note: Generate one SoundBank from an authored Event for Windows.
     next-tools:
       on-failure: [wwise_project__query_objects, wwise_project__get_project_info]
+
+  - name: inspect_soundbank_delivery
+    description: Reconcile Wwise ProjectInfo.json and per-platform SoundBank metadata with generated bank files.
+    source_file: scripts/inspect_soundbank_delivery.py
+    input_schema:
+      type: object
+      required: [generated_soundbanks_dir]
+      properties:
+        generated_soundbanks_dir:
+          type: string
+          minLength: 1
+          description: Existing GeneratedSoundBanks directory containing ProjectInfo.json.
+        max_items: {type: integer, minimum: 1, maximum: 5000, default: 500}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: true
+      deferred_hint: false
+    call_examples:
+      - arguments:
+          generated_soundbanks_dir: "C:/Game/WwiseProject/GeneratedSoundBanks"
+          max_items: 500
+        note: Verify generated platform metadata, SoundBanks, Events, media, and missing files.
+    next-tools:
+      on-failure: [wwise_project__get_project_info, wwise_project__generate_soundbank]
 
   - name: save_project
     description: Save the current Wwise project and all dirty Work Units.
