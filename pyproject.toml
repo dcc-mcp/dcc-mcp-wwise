@@ -50,6 +50,7 @@ include = [
   "tests",
   "tools",
   "README.md",
+  "CHANGELOG.md",
   "install.md",
   "LICENSE",
   "release-please-config.json",
