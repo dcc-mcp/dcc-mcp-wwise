@@ -56,6 +56,7 @@ include = [
   "release-please-config.json",
   ".release-please-manifest.json",
 ]
+exclude = ["showcase/sources/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

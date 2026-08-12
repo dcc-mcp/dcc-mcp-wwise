@@ -19,6 +19,10 @@ saves, and bounded audible previews. While the adapter is connected, Wwise also 
 session-scoped **DCC-MCP** menu for the project repository and playable audio
 showcase.
 
+![Wwise typed gameplay-audio workflow](showcase/wwise-workflow.webp)
+
+_Illustrative workflow generated with OpenAI ImageGen from the retained source in `showcase/sources`; live WAAPI and audible-playback evidence is documented separately in the reproducible audio showcase._
+
 ## Quick start
 
 Requirements: Wwise 2024.1+ with **Project > User Preferences > Enable Wwise
