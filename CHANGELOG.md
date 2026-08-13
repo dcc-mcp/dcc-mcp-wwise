@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.1...v0.1.2) (2026-08-13)
+
+
+### Bug Fixes
+
+* **release:** retain distributions on GitHub releases ([#5](https://github.com/dcc-mcp/dcc-mcp-wwise/issues/5)) ([9107fea](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/9107fea212e862c81f67a35af62227ed53d7b7cf))
+
 ## [0.1.1](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.0...v0.1.1) (2026-08-12)
 
 

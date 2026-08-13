@@ -7,7 +7,7 @@ metadata:
   dcc-mcp:
     dcc: wwise
     layer: domain
-    version: "0.1.1"  # x-release-please-version
+    version: "0.1.2"  # x-release-please-version
     tags: [wwise, waapi, audio, sound-design, music]
     search-hint: "Wwise RPG game audio design Switch State group container assignment RTPC curve Game Parameter dynamic music adaptive combat exploration SFX import variation Event output bus attenuation preview"
     tools: tools.yaml
