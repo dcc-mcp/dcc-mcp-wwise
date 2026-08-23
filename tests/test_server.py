@@ -20,6 +20,12 @@ def test_resolve_host_pid_rejects_ambiguous_instances(monkeypatch):
         server._resolve_host_pid(None)
 
 
+def test_server_cli_leaves_waapi_url_unset_for_environment_resolution():
+    args = server._parse_args([])
+
+    assert args.waapi_url is None
+
+
 def test_server_construction_is_host_bound(monkeypatch, tmp_path):
     monkeypatch.setenv("DCC_MCP_GATEWAY_PORT", "0")
     monkeypatch.setenv("DCC_MCP_REGISTRY_DIR", str(tmp_path / "registry"))
