@@ -225,7 +225,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the DCC-MCP Wwise adapter.")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--host-pid", type=int)
-    parser.add_argument("--waapi-url", default=DEFAULT_WAAPI_URL)
+    parser.add_argument("--waapi-url")
     parser.add_argument("--mcp-port", type=int)
     return parser.parse_args(argv)
 

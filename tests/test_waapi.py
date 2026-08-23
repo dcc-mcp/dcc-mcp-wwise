@@ -91,3 +91,33 @@ def test_resolve_waapi_url_rejects_invalid_urls(url, monkeypatch):
     else:
         with pytest.raises(ValueError):
             waapi.resolve_waapi_url(url)
+
+
+def test_remote_waapi_requires_wss_and_an_explicit_operator_allowlist(monkeypatch):
+    monkeypatch.setenv("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS", "wwise.example.com")
+    with pytest.raises(waapi.WaapiEndpointPolicyError, match="wss"):
+        waapi.resolve_waapi_url("ws://wwise.example.com:8080/waapi")
+
+    monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS")
+    with pytest.raises(waapi.WaapiEndpointPolicyError, match="allowlist"):
+        waapi.resolve_waapi_url("wss://wwise.example.com:8080/waapi")
+
+    monkeypatch.setenv("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS", "wwise.example.com")
+    assert (
+        waapi.resolve_waapi_url("wss://wwise.example.com:8080/waapi")
+        == "wss://wwise.example.com:8080/waapi"
+    )
+
+
+def test_waapi_endpoint_must_use_the_official_path(monkeypatch):
+    monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_URL", raising=False)
+
+    with pytest.raises(ValueError, match="/waapi"):
+        waapi.resolve_waapi_url("ws://127.0.0.1:8080/not-waapi")
+
+
+def test_waapi_endpoint_rejects_url_credentials(monkeypatch):
+    monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_URL", raising=False)
+
+    with pytest.raises(ValueError, match="credentials"):
+        waapi.resolve_waapi_url("ws://user:secret@127.0.0.1:8080/waapi")

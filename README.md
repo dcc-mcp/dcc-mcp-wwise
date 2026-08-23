@@ -28,8 +28,21 @@ _Illustrative workflow generated with OpenAI ImageGen from the retained source i
 Requirements: Wwise 2024.1+ with **Project > User Preferences > Enable Wwise
 Authoring API** enabled, Python 3.10+, and `dcc-mcp-cli` 0.19.86+.
 
+The PyPI wheel is not published yet, and the pinned Core catalog install block
+is still pending. Do not claim that the following release command works until
+those publication gates exist. Once published, the canonical wheel-first path
+is:
+
+```text
+python -m pip install --upgrade dcc-mcp-wwise
+dcc-mcp-wwise doctor --json
+dcc-mcp-wwise verify --json
+```
+
+After verification returns exit `0`, bind the service to the intended Wwise
+process:
+
 ```powershell
-python -m pip install -e ".[dev]"
 $wwisePid = (Get-Process Wwise | Where-Object MainWindowTitle -Like '*your-project*').Id
 dcc-mcp-wwise --host-pid $wwisePid
 ```
@@ -44,7 +57,8 @@ dcc-mcp-cli describe <returned-tool-slug>
 dcc-mcp-cli call <returned-tool-slug> --json '{}' --wait
 ```
 
-See [install.md](install.md) for setup and
+See [install.md](install.md) for publication status, Windows/macOS/Linux setup,
+WAAPI endpoint policy, stable doctor exits, upgrade, uninstall, and troubleshooting, and
 [showcase/audio/README.md](showcase/audio/README.md) for the reproducible audio showcase.
 
 ## Audio showcase
