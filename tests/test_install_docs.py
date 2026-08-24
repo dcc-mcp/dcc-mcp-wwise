@@ -30,6 +30,8 @@ def test_install_runbook_is_wheel_first_platform_complete_and_honest_about_publi
     assert "PyPI wheel is not published" in text
     assert "no adapter-managed external binary cache" in text
     assert "Linux remote verification is preflight-only" in text
+    assert "Remote WSS success returns exit `10` with `failure_stage: host_binding`" in text
+    assert "Start the adapter only after local loopback verification exits `0`" in text
     assert 'pip install -e ".[dev]"' not in text
 
 

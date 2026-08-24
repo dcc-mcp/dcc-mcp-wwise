@@ -138,6 +138,56 @@ def test_doctor_rejects_a_remote_endpoint_outside_the_operator_allowlist(monkeyp
     ]
 
 
+def test_remote_typed_probe_remains_preflight_until_adapter_is_bound_on_wwise_host(
+    monkeypatch, capsys
+):
+    from dcc_mcp_wwise import cli, waapi
+
+    class HealthyRemoteWaapiClient:
+        def __init__(self, url, allow_exception):
+            assert url == "wss://wwise.example.com:8080/waapi"
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setenv("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS", "wwise.example.com")
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyRemoteWaapiClient)
+
+    code = cli.main(
+        [
+            "doctor",
+            "--json",
+            "--waapi-url",
+            "wss://wwise.example.com:8080/waapi",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["status"] == "failed"
+    assert report["checks"]["runtime"]["success"] is True
+    assert report["verify"]["directly_usable"] is False
+    assert report["verify"]["failure_stage"] == "host_binding"
+    assert report["next_steps"] == [
+        {
+            "id": "start-adapter-on-wwise-host",
+            "description": "Start the PID-bound adapter on the Wwise authoring host",
+            "command": [
+                "dcc-mcp-wwise",
+                "--waapi-url",
+                "ws://127.0.0.1:8080/waapi",
+            ],
+            "why": report["verify"]["failure_reason"],
+            "execution_host": "wwise_host",
+        }
+    ]
+
+
 def test_verify_uses_the_same_typed_waapi_contract(monkeypatch, capsys):
     from dcc_mcp_wwise import cli, waapi
 
@@ -197,6 +247,28 @@ def test_doctor_reports_an_invalid_endpoint_port_without_contacting_waapi(monkey
         "--waapi-url",
         "ws://127.0.0.1:8080/waapi",
     ]
+
+
+@pytest.mark.parametrize("waapi_url", ["", "   "])
+def test_doctor_rejects_an_explicitly_empty_endpoint_without_contacting_waapi(
+    monkeypatch, capsys, waapi_url
+):
+    from dcc_mcp_wwise import cli, waapi
+
+    class UnexpectedClient:
+        def __init__(self, _url, _allow_exception):
+            raise AssertionError("empty endpoint configuration must fail before connection")
+
+    monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_URL", raising=False)
+    monkeypatch.setattr(waapi, "_client_type", lambda: UnexpectedClient)
+
+    code = cli.main(["doctor", "--json", "--waapi-url", waapi_url])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["checks"]["endpoint"]["success"] is False
+    assert report["verify"]["failure_stage"] == "configuration"
+    assert report["verify"]["directly_usable"] is False
 
 
 def test_doctor_does_not_echo_rejected_url_credentials(monkeypatch, capsys):
@@ -356,6 +428,7 @@ def test_malformed_runtime_result_remains_primary_when_disconnect_also_fails(
         {"displayName": "2024.1.1.08691"},
         {"displayName": " 2024.1.1.8691"},
         {"displayName": "2024.1.1.8691 "},
+        {"displayName": "2\u06602\u0664.1.1.8\u0666\u0669\u0661"},
         {"displayName": "2024.1.1." + ("9" * 100)},
         "2024.1.1.8691",
     ],

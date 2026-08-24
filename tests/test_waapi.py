@@ -124,14 +124,20 @@ def test_preview_clamps_one_shot_before_its_natural_end():
     assert module._preview_duration(Client(), "\\Sound", 2) == pytest.approx(1.35)
 
 
-@pytest.mark.parametrize("url", ["", "http://127.0.0.1:8080", "ws://missing-port/waapi"])
+@pytest.mark.parametrize(
+    "url",
+    ["", "   ", "http://127.0.0.1:8080", "ws://missing-port/waapi"],
+)
 def test_resolve_waapi_url_rejects_invalid_urls(url, monkeypatch):
     monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_URL", raising=False)
-    if not url:
-        assert waapi.resolve_waapi_url(url) == waapi.DEFAULT_WAAPI_URL
-    else:
-        with pytest.raises(ValueError):
-            waapi.resolve_waapi_url(url)
+    with pytest.raises(ValueError):
+        waapi.resolve_waapi_url(url)
+
+
+def test_resolve_waapi_url_defaults_only_when_no_explicit_value_or_environment(monkeypatch):
+    monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_URL", raising=False)
+
+    assert waapi.resolve_waapi_url(None) == waapi.DEFAULT_WAAPI_URL
 
 
 def test_remote_waapi_requires_wss_and_an_explicit_operator_allowlist(monkeypatch):
