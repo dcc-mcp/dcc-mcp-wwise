@@ -67,8 +67,17 @@ def connect_waapi(url: str | None = None) -> Iterator[Any]:
         raise WaapiConnectionError(f"WAAPI connection failed for {resolved}: {exc}") from exc
     try:
         yield client
-    finally:
-        client.disconnect()
+    except BaseException:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+        raise
+    else:
+        try:
+            client.disconnect()
+        except Exception as exc:
+            raise WaapiCallError(f"WAAPI disconnect failed: {exc}") from exc
 
 
 def call_waapi(
