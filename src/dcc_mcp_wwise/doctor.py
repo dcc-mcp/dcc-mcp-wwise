@@ -21,12 +21,12 @@ from .install_contract import (
 MIN_CORE_VERSION = "0.19.86"
 MIN_WWISE_VERSION = "2024.1"
 _MAX_VERSION_LENGTH = 39
-_RELEASE = re.compile(r"\A(\d{1,9})\.(\d{1,9})(?:\.(\d{1,9})(?:\.\d{1,9})?)?\Z")
+_RELEASE = re.compile(r"\A([0-9]{1,9})\.([0-9]{1,9})(?:\.([0-9]{1,9})(?:\.[0-9]{1,9})?)?\Z")
 _RUNTIME_VERSION = re.compile(
-    r"\A(0|[1-9]\d{0,8})\."
-    r"(0|[1-9]\d{0,8})\."
-    r"(0|[1-9]\d{0,8})\."
-    r"(0|[1-9]\d{0,8})\Z"
+    r"\A(0|[1-9][0-9]{0,8})\."
+    r"(0|[1-9][0-9]{0,8})\."
+    r"(0|[1-9][0-9]{0,8})\."
+    r"(0|[1-9][0-9]{0,8})\Z"
 )
 
 
@@ -347,4 +347,31 @@ def doctor_report(url: str | None = None, verb: str = "doctor") -> dict[str, Any
             verb=verb,
         )
     steps.append({"id": "probe-waapi", "status": "ok"})
+    if not waapi.is_loopback_waapi_url(resolved):
+        reason = (
+            "Remote WAAPI verification is preflight-only; directly usable requires the "
+            "adapter to run on the Wwise authoring host with local PID binding"
+        )
+        steps.append({"id": "bind-host", "status": "failed", "message": reason})
+        return _report(
+            checks,
+            steps,
+            EXIT_PREFLIGHT,
+            "host_binding",
+            reason,
+            [
+                {
+                    "id": "start-adapter-on-wwise-host",
+                    "description": "Start the PID-bound adapter on the Wwise authoring host",
+                    "command": [
+                        "dcc-mcp-wwise",
+                        "--waapi-url",
+                        waapi.DEFAULT_WAAPI_URL,
+                    ],
+                    "why": reason,
+                    "execution_host": "wwise_host",
+                }
+            ],
+            verb=verb,
+        )
     return _report(checks, steps, EXIT_OK, verb=verb)

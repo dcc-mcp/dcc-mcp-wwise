@@ -58,8 +58,9 @@ dcc-mcp-wwise doctor --json
 dcc-mcp-wwise verify --json
 ```
 
-Start the adapter only after exit `0`. On Windows, bind it to the intended Wwise
-process rather than choosing among multiple projects:
+Start the adapter only after local loopback verification exits `0`. On Windows,
+bind it to the intended Wwise process rather than choosing among multiple
+projects:
 
 ```powershell
 $wwisePid = (Get-Process Wwise | Where-Object MainWindowTitle -Like '*your-project*').Id
@@ -102,10 +103,16 @@ Both verbs validate endpoint syntax and port, loopback/remote allowlist policy,
 Core version, WAAPI enablement, the live typed runtime response, and the actual
 Wwise version. Their stable exits are:
 
-- `0`: the typed WAAPI probe passed and `directly_usable` is true;
-- `10`: endpoint, allowlist, enablement, Core, or Wwise-version preflight failed;
+- `0`: the local loopback typed WAAPI probe passed and `directly_usable` is true;
+- `10`: endpoint, allowlist, enablement, Core, Wwise-version, or host-binding
+  preflight failed;
 - `40`: a WAAPI session connected but the typed runtime call failed or returned
   an unusable response.
+
+Remote WSS success returns exit `10` with `failure_stage: host_binding` and
+`directly_usable: false`. Its machine-executable next step starts the PID-bound
+adapter over loopback on the Windows or macOS Wwise host; a remote verifier must
+not claim adapter readiness from `getInfo` alone.
 
 Failures contain `failure_stage`, `failure_reason`, and one machine-executable
 `next_steps[].command`. Connection success proves WAAPI is enabled and permits

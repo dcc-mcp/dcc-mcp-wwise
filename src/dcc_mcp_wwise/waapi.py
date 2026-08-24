@@ -24,7 +24,10 @@ class WaapiEndpointPolicyError(ValueError):
 
 
 def resolve_waapi_url(value: str | None = None) -> str:
-    url = (value or os.environ.get("DCC_MCP_WWISE_WAAPI_URL") or DEFAULT_WAAPI_URL).strip()
+    configured = (
+        value if value is not None else os.environ.get("DCC_MCP_WWISE_WAAPI_URL", DEFAULT_WAAPI_URL)
+    )
+    url = configured.strip()
     parsed = urlparse(url)
     if parsed.scheme not in {"ws", "wss"} or not parsed.hostname or not parsed.port:
         raise ValueError("WAAPI URL must be an absolute ws:// or wss:// URL with a port")
@@ -33,10 +36,7 @@ def resolve_waapi_url(value: str | None = None) -> str:
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("WAAPI URL must not contain credentials")
     host = parsed.hostname.strip().lower()
-    try:
-        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = host == "localhost"
+    loopback = is_loopback_waapi_url(url)
     if not loopback:
         if parsed.scheme != "wss":
             raise WaapiEndpointPolicyError("Remote WAAPI endpoints must use wss://")
@@ -56,6 +56,18 @@ def _client_type():
     from waapi import WaapiClient
 
     return WaapiClient
+
+
+def is_loopback_waapi_url(url: str) -> bool:
+    """Return whether a validated WAAPI URL targets the local host."""
+    host = urlparse(url).hostname
+    if host is None:
+        return False
+    normalized = host.strip().lower()
+    try:
+        return normalized == "localhost" or ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return normalized == "localhost"
 
 
 @contextmanager
