@@ -56,6 +56,47 @@ def test_call_error_is_not_misreported_as_connection_failure(monkeypatch):
         waapi.call_waapi("ak.wwise.core.soundbank.generate")
 
 
+def test_call_error_remains_primary_when_disconnect_also_fails(monkeypatch):
+    class FailingClient(FakeClient):
+        def call(self, uri, arguments, options):
+            raise ValueError("primary call failure")
+
+        def disconnect(self):
+            raise ValueError("secondary disconnect failure")
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: FailingClient)
+
+    with pytest.raises(waapi.WaapiCallError, match="primary call failure") as raised:
+        waapi.call_waapi("ak.wwise.core.soundbank.generate")
+
+    assert "secondary disconnect failure" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("result", "primary_reason"),
+    [
+        (None, "returned no result"),
+        ([], "returned a non-object result"),
+    ],
+)
+def test_malformed_get_info_remains_primary_when_disconnect_also_fails(
+    monkeypatch, result, primary_reason
+):
+    class MalformedClient(FakeClient):
+        def call(self, uri, arguments, options):
+            return result
+
+        def disconnect(self):
+            raise ValueError("secondary disconnect failure")
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: MalformedClient)
+
+    with pytest.raises(waapi.WaapiCallError, match=primary_reason) as raised:
+        waapi.get_wwise_info()
+
+    assert "secondary disconnect failure" not in str(raised.value)
+
+
 def _preview_module():
     script = (
         Path(__file__).parents[1]

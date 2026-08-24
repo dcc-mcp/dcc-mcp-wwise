@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 from contextlib import contextmanager
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlparse
 
 DEFAULT_WAAPI_URL = "ws://127.0.0.1:8080/waapi"
@@ -86,22 +86,32 @@ def call_waapi(
     *,
     options: Mapping[str, Any] | None = None,
     url: str | None = None,
+    result_validator: Callable[[Any], Any] | None = None,
 ) -> Any:
     with connect_waapi(url) as client:
         try:
             result = client.call(uri, dict(arguments or {}), options=dict(options or {}))
         except Exception as exc:
             raise WaapiCallError(f"WAAPI call failed for {uri}: {exc}") from exc
-    if result is None:
-        raise WaapiCallError(f"WAAPI call returned no result for {uri}")
+        if result is None:
+            raise WaapiCallError(f"WAAPI call returned no result for {uri}")
+        if result_validator is not None:
+            result = result_validator(result)
+    return result
+
+
+def _require_info_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise WaapiCallError("ak.wwise.core.getInfo returned a non-object result")
     return result
 
 
 def get_wwise_info(url: str | None = None) -> dict[str, Any]:
-    result = call_waapi("ak.wwise.core.getInfo", url=url)
-    if not isinstance(result, dict):
-        raise WaapiCallError("ak.wwise.core.getInfo returned a non-object result")
-    return result
+    return call_waapi(
+        "ak.wwise.core.getInfo",
+        url=url,
+        result_validator=_require_info_result,
+    )
 
 
 def get_wwise_version(url: str | None = None) -> str:
