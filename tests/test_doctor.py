@@ -304,6 +304,41 @@ def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, ca
 
 
 @pytest.mark.parametrize(
+    ("result", "primary_reason"),
+    [
+        (None, "returned no result"),
+        ([], "returned a non-object result"),
+        ({"version": {"displayName": "2024.1"}}, "valid Wwise version"),
+    ],
+)
+def test_malformed_runtime_result_remains_primary_when_disconnect_also_fails(
+    monkeypatch, capsys, result, primary_reason
+):
+    from dcc_mcp_wwise import cli, waapi
+
+    class MalformedWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, _uri, _arguments, options):
+            assert options == {}
+            return result
+
+        def disconnect(self):
+            raise ValueError("secondary disconnect failure")
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: MalformedWaapiClient)
+
+    code = cli.main(["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 40
+    assert report["verify"]["failure_stage"] == "runtime"
+    assert primary_reason in report["verify"]["failure_reason"]
+    assert "secondary disconnect failure" not in report["verify"]["failure_reason"]
+
+
+@pytest.mark.parametrize(
     "version",
     [
         ["2024.1.1.8691"],
@@ -313,6 +348,15 @@ def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, ca
         {"displayName": "   "},
         {"displayName": "Wwise 2024.1.1.8691"},
         {"name": "2024.1.1.8691 beta"},
+        {"displayName": "2024.1"},
+        {"displayName": "2024.1.1"},
+        {"displayName": "02024.1.1.8691"},
+        {"displayName": "2024.01.1.8691"},
+        {"displayName": "2024.1.01.8691"},
+        {"displayName": "2024.1.1.08691"},
+        {"displayName": " 2024.1.1.8691"},
+        {"displayName": "2024.1.1.8691 "},
+        {"displayName": "2024.1.1." + ("9" * 100)},
         "2024.1.1.8691",
     ],
 )

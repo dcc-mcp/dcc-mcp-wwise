@@ -20,26 +20,55 @@ from .install_contract import (
 
 MIN_CORE_VERSION = "0.19.86"
 MIN_WWISE_VERSION = "2024.1"
-_RELEASE = re.compile(r"\A(\d+)\.(\d+)(?:\.(\d+)(?:\.\d+)?)?\Z")
+_MAX_VERSION_LENGTH = 39
+_RELEASE = re.compile(r"\A(\d{1,9})\.(\d{1,9})(?:\.(\d{1,9})(?:\.\d{1,9})?)?\Z")
+_RUNTIME_VERSION = re.compile(
+    r"\A(0|[1-9]\d{0,8})\."
+    r"(0|[1-9]\d{0,8})\."
+    r"(0|[1-9]\d{0,8})\."
+    r"(0|[1-9]\d{0,8})\Z"
+)
+
+
+class _RuntimeVersionError(waapi.WaapiCallError):
+    """The typed getInfo result did not contain a canonical runtime version."""
 
 
 def _release_tuple(value: str) -> tuple[int, int, int] | None:
-    match = _RELEASE.match(value.strip())
+    normalized = value.strip()
+    if len(normalized) > _MAX_VERSION_LENGTH:
+        return None
+    match = _RELEASE.match(normalized)
     if match is None:
         return None
     major, minor, patch = match.groups()
     return int(major), int(minor), int(patch or 0)
 
 
-def _typed_wwise_version(info: dict[str, Any]) -> str | None:
-    version = info.get("version")
-    if not isinstance(version, dict):
+def _runtime_version_tuple(value: str) -> tuple[int, int, int, int] | None:
+    if len(value) > _MAX_VERSION_LENGTH:
         return None
-    for key in ("displayName", "name"):
-        value = version.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    match = _RUNTIME_VERSION.match(value)
+    if match is None:
+        return None
+    return tuple(int(component) for component in match.groups())
+
+
+def _typed_wwise_version(
+    info: Any,
+) -> tuple[str, tuple[int, int, int, int]]:
+    if not isinstance(info, dict):
+        raise waapi.WaapiCallError("ak.wwise.core.getInfo returned a non-object result")
+    version = info.get("version")
+    if isinstance(version, dict):
+        for key in ("displayName", "name"):
+            value = version.get(key)
+            if not isinstance(value, str):
+                continue
+            release = _runtime_version_tuple(value)
+            if release is not None:
+                return value, release
+    raise _RuntimeVersionError("ak.wwise.core.getInfo did not return a valid Wwise version")
 
 
 def _report(
@@ -203,8 +232,16 @@ def doctor_report(url: str | None = None, verb: str = "doctor") -> dict[str, Any
         )
     steps.append({"id": "validate-core", "status": "ok"})
 
+    runtime_version_reason: str | None = None
     try:
-        info = waapi.get_wwise_info(resolved)
+        runtime_version = waapi.call_waapi(
+            "ak.wwise.core.getInfo",
+            url=resolved,
+            result_validator=_typed_wwise_version,
+        )
+    except _RuntimeVersionError as exc:
+        runtime_version = None
+        runtime_version_reason = str(exc)
     except waapi.WaapiConnectionError as exc:
         reason = str(exc)
         checks["runtime"] = {
@@ -256,8 +293,8 @@ def doctor_report(url: str | None = None, verb: str = "doctor") -> dict[str, Any
             verb=verb,
         )
 
-    wwise_version = _typed_wwise_version(info) or "unknown"
-    wwise_release = _release_tuple(wwise_version)
+    wwise_version = runtime_version[0] if runtime_version is not None else "unknown"
+    wwise_release = runtime_version[1][:3] if runtime_version is not None else None
     minimum_wwise = _release_tuple(MIN_WWISE_VERSION)
     checks["runtime"] = {
         "success": False,
@@ -267,7 +304,7 @@ def doctor_report(url: str | None = None, verb: str = "doctor") -> dict[str, Any
         "minimum_wwise_version": MIN_WWISE_VERSION,
     }
     if wwise_release is None:
-        reason = "ak.wwise.core.getInfo did not return a valid Wwise version"
+        reason = runtime_version_reason or "ak.wwise.core.getInfo returned invalid version data"
         steps.append({"id": "probe-waapi", "status": "failed", "message": reason})
         return _report(
             checks,
