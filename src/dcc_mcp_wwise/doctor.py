@@ -20,15 +20,26 @@ from .install_contract import (
 
 MIN_CORE_VERSION = "0.19.86"
 MIN_WWISE_VERSION = "2024.1"
-_RELEASE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+_RELEASE = re.compile(r"\A(\d+)\.(\d+)(?:\.(\d+)(?:\.\d+)?)?\Z")
 
 
 def _release_tuple(value: str) -> tuple[int, int, int] | None:
-    match = _RELEASE.search(value.strip())
+    match = _RELEASE.match(value.strip())
     if match is None:
         return None
     major, minor, patch = match.groups()
     return int(major), int(minor), int(patch or 0)
+
+
+def _typed_wwise_version(info: dict[str, Any]) -> str | None:
+    version = info.get("version")
+    if not isinstance(version, dict):
+        return None
+    for key in ("displayName", "name"):
+        value = version.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _report(
@@ -245,13 +256,7 @@ def doctor_report(url: str | None = None, verb: str = "doctor") -> dict[str, Any
             verb=verb,
         )
 
-    version_value = info.get("version", "unknown")
-    if isinstance(version_value, dict):
-        wwise_version = str(
-            version_value.get("displayName") or version_value.get("name") or "unknown"
-        )
-    else:
-        wwise_version = str(version_value)
+    wwise_version = _typed_wwise_version(info) or "unknown"
     wwise_release = _release_tuple(wwise_version)
     minimum_wwise = _release_tuple(MIN_WWISE_VERSION)
     checks["runtime"] = {

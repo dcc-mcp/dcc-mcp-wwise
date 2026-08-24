@@ -250,6 +250,35 @@ def test_doctor_uses_verify_exit_when_connected_waapi_rejects_the_typed_probe(mo
     assert "getInfo is unavailable" in report["verify"]["failure_reason"]
 
 
+def test_doctor_reports_disconnect_failure_as_one_structured_runtime_failure(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    class DisconnectingWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, _uri, _arguments, options):
+            assert options == {}
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            raise ValueError("disconnect failed")
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: DisconnectingWaapiClient)
+
+    code = cli.main(["doctor", "--json"])
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert len(captured.out.splitlines()) == 1
+    report = json.loads(captured.out)
+    assert code == 40
+    assert report["status"] == "failed"
+    assert report["verify"]["failure_stage"] == "runtime"
+    assert report["verify"]["directly_usable"] is False
+    assert "disconnect failed" in report["verify"]["failure_reason"]
+
+
 def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, capsys):
     from dcc_mcp_wwise import cli, waapi
 
@@ -272,6 +301,44 @@ def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, ca
     assert code == 40
     assert report["verify"]["failure_stage"] == "runtime"
     assert report["checks"]["runtime"]["wwise_version"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        ["2024.1.1.8691"],
+        2024.1,
+        {"displayName": {"value": "2024.1.1.8691"}},
+        {"displayName": ""},
+        {"displayName": "   "},
+        {"displayName": "Wwise 2024.1.1.8691"},
+        {"name": "2024.1.1.8691 beta"},
+        "2024.1.1.8691",
+    ],
+)
+def test_doctor_fails_closed_for_noncanonical_typed_runtime_versions(monkeypatch, capsys, version):
+    from dcc_mcp_wwise import cli, waapi
+
+    class MalformedWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, _uri, _arguments, options):
+            assert options == {}
+            return {"version": version}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: MalformedWaapiClient)
+
+    code = cli.main(["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 40
+    assert report["status"] == "failed"
+    assert report["verify"]["failure_stage"] == "runtime"
+    assert report["verify"]["directly_usable"] is False
 
 
 def test_doctor_rejects_wwise_below_the_supported_floor(monkeypatch, capsys):
