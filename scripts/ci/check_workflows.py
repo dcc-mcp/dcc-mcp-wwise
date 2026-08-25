@@ -18,6 +18,92 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+RELEASE_SOURCE_LINES = (
+    "set -euo pipefail",
+    'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"',
+    "SOURCE_SHA=$(git rev-parse HEAD)",
+    "TAG_TYPE=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.type')",
+    "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
+    (
+        "RELEASE_TARGET=$(gh api "
+        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" '
+        "--jq '.target_commitish')"
+    ),
+    'test "$TAG_TYPE" = "commit"',
+    'test "$TAG_SHA" = "$SOURCE_SHA"',
+    'test "$RELEASE_TARGET" = "$SOURCE_SHA"',
+    'echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"',
+)
+BUILD_SOURCE_LINES = (
+    "set -euo pipefail",
+    'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"',
+    "SOURCE_SHA=$(git rev-parse HEAD)",
+    'TAG_SHA=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")',
+    'test "$SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
+    'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
+    'echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"',
+)
+PYPI_IDENTITY_LINES = (
+    "set -euo pipefail",
+    'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
+    'test -n "$ARTIFACT_ID"',
+    '[[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+    "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
+    (
+        "RELEASE_TARGET=$(gh api "
+        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" '
+        "--jq '.target_commitish')"
+    ),
+    'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
+    'test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"',
+    "test \"$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
+    "test \"$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
+    'test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2',
+)
+ATTACH_IDENTITY_LINES = (
+    "set -euo pipefail",
+    'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
+    'test -n "$ARTIFACT_ID"',
+    '[[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+    "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
+    "RELEASE_ID=$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME\" --jq '.id')",
+    (
+        "RELEASE_TARGET=$(gh api "
+        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" '
+        "--jq '.target_commitish')"
+    ),
+    'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
+    'test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"',
+    "test \"$(find release-assets -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
+    "test \"$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
+    'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2',
+    (
+        "EXISTING=$(gh api --paginate "
+        '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" '
+        "--jq '.[].name')"
+    ),
+    "for asset in release-assets/*; do",
+    'name=$(basename "$asset")',
+    'if grep -Fqx "$name" <<< "$EXISTING"; then',
+    'echo "::error::existing release asset refuses no-clobber publication: $name"',
+    "exit 1",
+    "fi",
+    "done",
+    'gh release upload "$TAG_NAME" release-assets/* --repo "$GITHUB_REPOSITORY"',
+)
+LOCK_REGENERATE_RUN = 'python -m pip install "uv==0.11.19"\nuv lock\n'
+LOCK_COMMIT_RUN = (
+    "set -euo pipefail\n"
+    "if git diff --quiet -- uv.lock; then\n"
+    '  echo "uv.lock is already synchronized."\n'
+    "  exit 0\n"
+    "fi\n"
+    'git config user.name "loonghao"\n'
+    'git config user.email "hal.long@outlook.com"\n'
+    "git add uv.lock\n"
+    'git commit -m "chore(ci): sync generated release lock"\n'
+    'git push origin "HEAD:${HEAD_REF}"\n'
+)
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -78,6 +164,12 @@ def _step_by_name(steps: Sequence[Mapping[str, Any]], name: str) -> Mapping[str,
     return matches[0]
 
 
+def _step_markers(
+    steps: Sequence[Mapping[str, Any]],
+) -> list[tuple[Any, Any, Any]]:
+    return [(step.get("name"), step.get("id"), step.get("uses")) for step in steps]
+
+
 def _run(step: Mapping[str, Any], name: str) -> str:
     value = step.get("run")
     if not isinstance(value, str) or not value.strip():
@@ -89,43 +181,16 @@ def _without_comments(value: str) -> str:
     return "\n".join(line for line in value.splitlines() if not line.lstrip().startswith("#"))
 
 
-def _require_closed_identity_shell(value: str, label: str, *, allow_release_upload: bool) -> None:
-    exact_lines = {
-        "set -euo pipefail",
-        'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
-        'test -n "$ARTIFACT_ID"',
-        '[[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
-        'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
-        'test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"',
-        "test \"$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
-        "test \"$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
-        'test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2',
-        "test \"$(find release-assets -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
-        "test \"$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
-        'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2',
-        "for asset in release-assets/*; do",
-        'name=$(basename "$asset")',
-        'if grep -Fqx "$name" <<< "$EXISTING"; then',
-        'echo "::error::existing release asset refuses no-clobber publication: $name"',
-        "exit 1",
-        "fi",
-        "done",
-    }
-    allowed_prefixes = (
-        'TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME"',
-        'RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME"',
-        'RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME"',
-        'EXISTING=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets',
+def _executable_lines(value: str) -> tuple[str, ...]:
+    return tuple(
+        line.strip()
+        for line in value.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     )
-    upload = 'gh release upload "$TAG_NAME" release-assets/* --repo "$GITHUB_REPOSITORY"'
-    for raw_line in value.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line in exact_lines or any(line.startswith(prefix) for prefix in allowed_prefixes):
-            continue
-        if allow_release_upload and line == upload:
-            continue
+
+
+def _require_closed_shell(value: str, label: str, expected_lines: Sequence[str]) -> None:
+    if _executable_lines(value) != tuple(expected_lines):
         raise ValueError(f"{label} must keep the reviewed closed mutation surface")
 
 
@@ -161,6 +226,15 @@ def validate_release(document: Mapping[str, Any]) -> None:
     if attach.get("permissions") != {"actions": "read", "contents": "write"}:
         raise ValueError("GitHub asset permissions must be least privilege")
 
+    if _step_markers(_steps(release_please, "jobs.release-please")) != [
+        (
+            None,
+            "release",
+            "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7",
+        )
+    ]:
+        raise ValueError("release-please must keep its exact reviewed step")
+
     build_outputs = _mapping(build.get("outputs"), "build.outputs")
     if set(build_outputs) != {"source_sha", "artifact_id", "artifact_digest"}:
         raise ValueError("build must expose source, artifact ID, and content digest")
@@ -178,28 +252,47 @@ def validate_release(document: Mapping[str, Any]) -> None:
         raise ValueError("build artifact must contain the wheel and sdist")
 
     verify_steps = _steps(verify, "jobs.verify-release-source")
-    source_run = _run(
-        _step_by_name(verify_steps, "Bind tag and GitHub Release to the checked-out source"),
-        "source verification",
+    if _step_markers(verify_steps) != [
+        (None, None, CHECKOUT),
+        ("Bind tag and GitHub Release to the checked-out source", "source", None),
+    ]:
+        raise ValueError("source verification must keep its reviewed ordered steps")
+    source_step = _step_by_name(
+        verify_steps, "Bind tag and GitHub Release to the checked-out source"
     )
-    for required in (
-        'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"',
-        "SOURCE_SHA=$(git rev-parse HEAD)",
-        'test "$TAG_SHA" = "$SOURCE_SHA"',
-        'test "$RELEASE_TARGET" = "$SOURCE_SHA"',
-    ):
-        if required not in source_run:
-            raise ValueError(
-                "source verification must freshly bind tag, Release, and checked-out HEAD"
-            )
+    if source_step.get("id") != "source" or source_step.get("shell") != "bash":
+        raise ValueError("source verification must keep its exact reviewed step binding")
+    if source_step.get("env") != {
+        "GH_HOST": "github.com",
+        "GH_TOKEN": "${{ github.token }}",
+        "TAG_NAME": "${{ needs.release-please.outputs.tag_name }}",
+    }:
+        raise ValueError("source verification must keep its exact reviewed environment")
+    source_run = _run(source_step, "source verification")
+    _require_closed_shell(source_run, "source verification", RELEASE_SOURCE_LINES)
 
-    build_source_run = _run(
-        _step_by_name(build_steps, "Bind build to verified source"), "build source"
-    )
-    if 'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"' not in build_source_run:
-        raise ValueError("build must freshly fetch the tag before comparing checked-out HEAD")
-    if 'test "$SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"' not in build_source_run:
-        raise ValueError("build must bind actual checked-out HEAD to the verified source")
+    build_source_step = _step_by_name(build_steps, "Bind build to verified source")
+    if build_source_step.get("id") != "source" or build_source_step.get("shell") != "bash":
+        raise ValueError("build source must keep its exact reviewed step binding")
+    if build_source_step.get("env") != {
+        "VERIFIED_SOURCE_SHA": "${{ needs.verify-release-source.outputs.source_sha }}",
+        "TAG_NAME": "${{ needs.release-please.outputs.tag_name }}",
+    }:
+        raise ValueError("build source must keep its exact reviewed environment")
+    build_source_run = _run(build_source_step, "build source")
+    _require_closed_shell(build_source_run, "build source", BUILD_SOURCE_LINES)
+    if _step_markers(build_steps) != [
+        (None, None, CHECKOUT),
+        (None, None, SETUP_PYTHON),
+        ("Bind build to verified source", "source", None),
+        ("Install release validation dependencies", None, None),
+        ("Validate release contracts", None, None),
+        ("Build wheel and sdist", None, None),
+        ("Validate distributions", None, None),
+        ("Upload immutable Python distributions", "upload", UPLOAD_ARTIFACT),
+        ("Record immutable build receipt", None, None),
+    ]:
+        raise ValueError("build must keep its reviewed ordered steps")
 
     publish_steps = _steps(publish, "jobs.publish")
     attach_steps = _steps(attach, "jobs.attach-release-assets")
@@ -230,22 +323,35 @@ def validate_release(document: Mapping[str, Any]) -> None:
         if consumer.get("uses") != DOWNLOAD_ARTIFACT:
             raise ValueError(f"{label} must use the reviewed artifact downloader")
         inputs = _mapping(consumer.get("with"), f"{label} download inputs")
-        if inputs.get("artifact-ids") != BUILD_ARTIFACT_ID:
-            raise ValueError(f"{label} must download the exact build artifact ID")
-        if inputs.get("merge-multiple") is not True:
-            raise ValueError(f"{label} must expose the exact artifact files directly")
+        expected_inputs = {
+            "artifact-ids": BUILD_ARTIFACT_ID,
+            "path": "dist" if label == "PyPI" else "release-assets",
+            "merge-multiple": True,
+        }
+        if inputs != expected_inputs:
+            raise ValueError(f"{label} must download only the exact build artifact ID")
 
     pypi_inputs = _mapping(pypi_steps[0].get("with"), "PyPI inputs")
-    if pypi_inputs.get("skip-existing") not in (None, False):
-        raise ValueError("PyPI publication must fail rather than overwrite or skip existing files")
+    if pypi_inputs != {
+        "packages-dir": "dist",
+        "verbose": True,
+        "print-hash": True,
+    }:
+        raise ValueError("PyPI publication must keep its exact fail-closed inputs")
 
+    identity_env = {
+        "GH_HOST": "github.com",
+        "GH_TOKEN": "${{ github.token }}",
+        "TAG_NAME": "${{ needs.release-please.outputs.tag_name }}",
+        "BUILD_SOURCE_SHA": "${{ needs.build.outputs.source_sha }}",
+        "VERIFIED_SOURCE_SHA": "${{ needs.verify-release-source.outputs.source_sha }}",
+        "ARTIFACT_ID": BUILD_ARTIFACT_ID,
+        "ARTIFACT_DIGEST": BUILD_ARTIFACT_DIGEST,
+    }
     for step, label in ((publish_steps[1], "PyPI"), (attach_steps[1], "GitHub assets")):
         env = _mapping(step.get("env"), f"{label} identity env")
-        if (
-            env.get("ARTIFACT_ID") != BUILD_ARTIFACT_ID
-            or env.get("ARTIFACT_DIGEST") != BUILD_ARTIFACT_DIGEST
-        ):
-            raise ValueError(f"{label} must bind the build artifact ID and content digest")
+        if env != identity_env or step.get("shell") != "bash":
+            raise ValueError(f"{label} must keep the exact identity step binding")
         identity = _run(step, f"{label} identity")
         for required in ("TAG_SHA=$(gh api", "RELEASE_TARGET=$(gh api", "ARTIFACT_DIGEST"):
             if required not in identity:
@@ -253,13 +359,15 @@ def validate_release(document: Mapping[str, Any]) -> None:
                     f"{label} must freshly recapture immutable identity before mutation"
                 )
 
-    _require_closed_identity_shell(
-        _run(publish_steps[1], "PyPI identity"), "PyPI identity", allow_release_upload=False
+    _require_closed_shell(
+        _run(publish_steps[1], "PyPI identity"),
+        "PyPI identity",
+        PYPI_IDENTITY_LINES,
     )
-    _require_closed_identity_shell(
+    _require_closed_shell(
         _run(attach_steps[1], "GitHub asset mutation"),
         "GitHub asset mutation",
-        allow_release_upload=True,
+        ATTACH_IDENTITY_LINES,
     )
 
     attach_run = _run(attach_steps[1], "GitHub asset mutation")
@@ -300,15 +408,61 @@ def validate_ci(document: Mapping[str, Any]) -> None:
 def validate_lock_sync(document: Mapping[str, Any]) -> None:
     if document.get("permissions") != {}:
         raise ValueError("lock sync top-level permissions must be empty")
+    if set(_jobs(document)) != {"sync-release-lock"}:
+        raise ValueError("lock sync must expose only the reviewed write-capable job")
     _require_pinned_actions(document, "lock sync")
     _require_timeouts(document, "lock sync")
     job = _job(document, "sync-release-lock")
     if job.get("permissions") != {"contents": "write", "pull-requests": "read"}:
         raise ValueError("lock sync permissions must be minimal")
-    runs = "\n".join(str(step.get("run", "")) for step in _steps(job, "sync-release-lock"))
-    for required in ('python -m pip install "uv==0.11.19"', "uv lock", "git add uv.lock"):
-        if required not in runs:
-            raise ValueError("release-please lock sync must regenerate and stage only uv.lock")
+    expected_job_keys = {
+        "name",
+        "runs-on",
+        "timeout-minutes",
+        "if",
+        "permissions",
+        "steps",
+    }
+    if set(job) != expected_job_keys:
+        raise ValueError("lock sync write job must keep its exact reviewed surface")
+    if job.get("name") != "Sync generated release lock" or job.get("runs-on") != "ubuntu-latest":
+        raise ValueError("lock sync write job must keep its exact reviewed surface")
+    expected_condition = (
+        "github.event.pull_request.head.repo.full_name == github.repository && "
+        "startsWith(github.event.pull_request.head.ref, "
+        "'release-please--branches--main') && "
+        "startsWith(github.event.pull_request.title, 'chore(main): release ')"
+    )
+    if job.get("if") != expected_condition:
+        raise ValueError("lock sync write job must keep its exact reviewed condition")
+
+    steps = _steps(job, "sync-release-lock")
+    if len(steps) != 4:
+        raise ValueError("lock sync must keep the reviewed ordered steps")
+    expected_steps: list[Mapping[str, Any]] = [
+        {
+            "uses": CHECKOUT,
+            "with": {
+                "ref": "${{ github.event.pull_request.head.ref }}",
+                "token": "${{ secrets.PERSONAL_ACCESS_TOKEN }}",
+            },
+        },
+        {"uses": SETUP_PYTHON, "with": {"python-version": "3.12"}},
+        {
+            "name": "Regenerate the exact release lock",
+            "run": LOCK_REGENERATE_RUN,
+        },
+        {
+            "name": "Commit the generated lock only when needed",
+            "env": {"HEAD_REF": "${{ github.event.pull_request.head.ref }}"},
+            "shell": "bash",
+            "run": LOCK_COMMIT_RUN,
+        },
+    ]
+    if steps != expected_steps:
+        raise ValueError(
+            "lock sync must keep the reviewed ordered steps and closed mutation surface"
+        )
 
 
 def validate_version_consistency(document: Mapping[str, Any]) -> None:

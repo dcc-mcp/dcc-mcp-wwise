@@ -26,6 +26,12 @@ def _release_document():
     return yaml_loads((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
 
 
+def _lock_sync_document():
+    return yaml_loads(
+        (ROOT / ".github/workflows/release-please-lock-sync.yml").read_text(encoding="utf-8")
+    )
+
+
 def test_release_contract_ignores_comment_decoys_but_rejects_real_clobber() -> None:
     from scripts.ci.check_workflows import validate_release
 
@@ -93,6 +99,147 @@ def test_release_rejects_a_decoy_pypi_upload_in_the_identity_step() -> None:
     document = _release_document()
     identity = document["jobs"]["publish"]["steps"][1]
     identity["run"] += "\npython -m twine upload dist/*\n"
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "; python -m twine upload dist/*",
+        " && python -m twine upload dist/*",
+        " || python -m twine upload dist/*",
+        " | python -m twine upload dist/*",
+        " $(python -m twine upload dist/*)",
+        " \\\npython -m twine upload dist/*",
+        "; $PUBLISHER dist/*",
+    ],
+)
+def test_release_rejects_same_line_suffixes_on_authoritative_gh_api(
+    suffix: str,
+) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    identity = document["jobs"]["publish"]["steps"][1]
+    authoritative = (
+        "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')"
+    )
+    identity["run"] = identity["run"].replace(authoritative, authoritative + suffix, 1)
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
+def test_release_ignores_comments_but_rejects_echo_decoys_in_identity_step() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    identity = document["jobs"]["publish"]["steps"][1]
+    identity["run"] += "\n# inert TAG_SHA=$(gh api decoy)\n"
+    validate_release(document)
+
+    identity["run"] += "\necho 'TAG_SHA=$(gh api decoy)'\n"
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
+def test_lock_sync_rejects_broad_or_additional_staging() -> None:
+    from scripts.ci.check_workflows import validate_lock_sync
+
+    for replacement in ("git add .", "git add -A", "git add uv.lock README.md"):
+        document = _lock_sync_document()
+        commit = document["jobs"]["sync-release-lock"]["steps"][-1]
+        commit["run"] = commit["run"].replace("git add uv.lock", replacement)
+
+        with pytest.raises(ValueError, match="closed mutation surface"):
+            validate_lock_sync(document)
+
+
+def test_lock_sync_rejects_additional_push_or_mutation_step() -> None:
+    from scripts.ci.check_workflows import validate_lock_sync
+
+    document = _lock_sync_document()
+    commit = document["jobs"]["sync-release-lock"]["steps"][-1]
+    commit["run"] += '\ngit push origin "HEAD:decoy"\n'
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_lock_sync(document)
+
+    document = _lock_sync_document()
+    document["jobs"]["sync-release-lock"]["steps"].append(
+        {"name": "Decoy mutation", "run": "git add ."}
+    )
+    with pytest.raises(ValueError, match="reviewed ordered steps"):
+        validate_lock_sync(document)
+
+
+@pytest.mark.parametrize(
+    "decoy",
+    [
+        "# git add .",
+        'git commit --allow-empty -m "decoy"',
+        'gh api --method PATCH "repos/$GITHUB_REPOSITORY"',
+    ],
+)
+def test_lock_sync_rejects_comment_decoys_and_extra_write_commands(
+    decoy: str,
+) -> None:
+    from scripts.ci.check_workflows import validate_lock_sync
+
+    document = _lock_sync_document()
+    commit = document["jobs"]["sync-release-lock"]["steps"][-1]
+    commit["run"] += "\n{}\n".format(decoy)
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_lock_sync(document)
+
+
+def test_lock_sync_rejects_duplicate_or_reordered_steps() -> None:
+    from scripts.ci.check_workflows import validate_lock_sync
+
+    document = _lock_sync_document()
+    steps = document["jobs"]["sync-release-lock"]["steps"]
+    steps.append(dict(steps[-1]))
+    with pytest.raises(ValueError, match="reviewed ordered steps"):
+        validate_lock_sync(document)
+
+    document = _lock_sync_document()
+    steps = document["jobs"]["sync-release-lock"]["steps"]
+    steps[2], steps[3] = steps[3], steps[2]
+    with pytest.raises(ValueError, match="reviewed ordered steps"):
+        validate_lock_sync(document)
+
+
+@pytest.mark.parametrize(
+    ("job", "step_index", "needle"),
+    [
+        (
+            "verify-release-source",
+            1,
+            'TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" '
+            "--jq '.object.sha')",
+        ),
+        (
+            "build",
+            2,
+            'TAG_SHA=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")',
+        ),
+        (
+            "attach-release-assets",
+            1,
+            "RELEASE_ID=$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME\" --jq '.id')",
+        ),
+    ],
+)
+def test_every_sensitive_release_run_rejects_prefixed_commands(
+    job: str, step_index: int, needle: str
+) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    step = document["jobs"][job]["steps"][step_index]
+    step["run"] = step["run"].replace(needle, "true && " + needle, 1)
 
     with pytest.raises(ValueError, match="closed mutation surface"):
         validate_release(document)
