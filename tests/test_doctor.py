@@ -1,13 +1,68 @@
 import json
 import sys
+from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fake_doctor_host_boundaries(monkeypatch):
+    from dcc_mcp_wwise import doctor, process_identity, waapi
+
+    identity = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
+    monkeypatch.setattr(process_identity, "observe_wwise_process", lambda _pid: identity)
+
+    def in_process_get_info(url=None, *, timeout_secs=5.0):
+        assert timeout_secs > 0
+
+        def validate(result):
+            doctor._typed_wwise_version(result)
+            return result
+
+        return waapi.call_waapi("ak.wwise.core.getInfo", url=url, result_validator=validate)
+
+    monkeypatch.setattr(waapi, "get_wwise_info", in_process_get_info)
+
+
+def test_install_contract_is_owned_by_formal_core_02014() -> None:
+    from dcc_mcp_core.deployment import (
+        INSTALL_EXIT_OK,
+        INSTALL_EXIT_PREFLIGHT,
+        INSTALL_EXIT_VERIFY,
+        INSTALL_SOP_SCHEMA_VERSION,
+        load_install_sop_schema,
+    )
+
+    from dcc_mcp_wwise import doctor
+
+    assert doctor.MIN_CORE_VERSION == "0.20.14"
+    assert doctor.SCHEMA_VERSION == INSTALL_SOP_SCHEMA_VERSION
+    assert (doctor.EXIT_OK, doctor.EXIT_PREFLIGHT, doctor.EXIT_VERIFY) == (
+        INSTALL_EXIT_OK,
+        INSTALL_EXIT_PREFLIGHT,
+        INSTALL_EXIT_VERIFY,
+    )
+    assert load_install_sop_schema()["properties"]["schema_version"]["const"] == 1
+    assert not (
+        Path(__file__).parents[1] / "src" / "dcc_mcp_wwise" / "install_contract.py"
+    ).exists()
+
+
+def test_public_report_validates_with_the_packaged_core_schema() -> None:
+    from dcc_mcp_core.deployment import load_install_sop_schema
+    from jsonschema import Draft202012Validator
+
+    from dcc_mcp_wwise import doctor
+
+    report = doctor.doctor_report(timeout_ms=0)
+    assert report.pop("_exit_code") == doctor.EXIT_PREFLIGHT
+    Draft202012Validator(load_install_sop_schema()).validate(report)
 
 
 class UnreachableWaapiClient:
     def __init__(self, _url, allow_exception):
         assert allow_exception is True
-        raise RuntimeError("connection refused")
+        raise RuntimeError("connection refused token=secret C:/private/project.wproj")
 
 
 def test_root_help_discovers_doctor_verify_and_server_mode(capsys):
@@ -50,9 +105,35 @@ def test_public_doctor_reports_unreachable_waapi_as_structured_preflight(monkeyp
     assert report["checks"]["runtime"]["success"] is False
     assert report["verify"]["directly_usable"] is False
     assert report["verify"]["failure_stage"] == "waapi_enablement"
-    assert "connection refused" in report["verify"]["failure_reason"]
+    assert report["verify"]["failure_reason"] == ("The WAAPI connection could not be established")
+    assert report["verify"]["failure_type"] == "connection_failed"
+    assert "connection refused" not in json.dumps(report)
+    assert "secret" not in json.dumps(report)
+    assert "private" not in json.dumps(report)
     assert len(report["next_steps"]) == 1
     assert report["next_steps"][0]["command"]
+
+
+def test_public_doctor_classifies_deadline_without_raw_details(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    monkeypatch.setattr(
+        waapi,
+        "get_wwise_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(waapi.WaapiTimeoutError()),
+    )
+
+    code = cli.main(["doctor", "--json", "--timeout-ms", "50"])
+
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert captured.err == ""
+    assert code == 40
+    assert report["verify"]["directly_usable"] is False
+    assert report["verify"]["failure_stage"] == "deadline"
+    assert report["verify"]["failure_type"] == "timeout"
+    assert "token" not in captured.out
+    assert "certificate" not in captured.out
 
 
 def test_public_doctor_uses_typed_get_info_to_prove_waapi_is_usable(monkeypatch, capsys):
@@ -78,7 +159,7 @@ def test_public_doctor_uses_typed_get_info_to_prove_waapi_is_usable(monkeypatch,
     HealthyWaapiClient.calls.clear()
     monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
 
-    code = cli.main(["doctor", "--json"])
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
 
     report = json.loads(capsys.readouterr().out)
     assert code == 0
@@ -86,7 +167,7 @@ def test_public_doctor_uses_typed_get_info_to_prove_waapi_is_usable(monkeypatch,
     assert report["checks"]["core"] == {
         "success": True,
         "version": report["core_version"],
-        "minimum": "0.19.86",
+        "minimum": "0.20.14",
     }
     assert report["checks"]["runtime"] == {
         "success": True,
@@ -99,6 +180,7 @@ def test_public_doctor_uses_typed_get_info_to_prove_waapi_is_usable(monkeypatch,
         "directly_usable": True,
         "failure_stage": None,
         "failure_reason": None,
+        "failure_type": None,
     }
     assert report["next_steps"] == []
     assert HealthyWaapiClient.calls == [
@@ -109,6 +191,123 @@ def test_public_doctor_uses_typed_get_info_to_prove_waapi_is_usable(monkeypatch,
             {},
         )
     ]
+
+
+def test_loopback_get_info_without_exact_host_identity_is_preflight_only(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+
+    code = cli.main(["doctor", "--json"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["checks"]["runtime"]["success"] is True
+    assert report["verify"]["directly_usable"] is False
+    assert report["verify"]["failure_stage"] == "host_identity"
+    assert report["verify"]["failure_type"] == "identity_unavailable"
+
+
+def test_loopback_is_usable_only_after_same_exact_identity_is_recaptured(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity, waapi
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    identity = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
+    observations = []
+
+    def observe(pid):
+        observations.append(pid)
+        return identity
+
+    monkeypatch.setattr(process_identity, "observe_wwise_process", observe)
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert observations == [4321, 4321]
+    assert report["checks"]["identity"] == {
+        "success": True,
+        "pid": 4321,
+        "executable": "Wwise.exe",
+        "started_at": "start-1",
+    }
+    assert report["verify"]["directly_usable"] is True
+
+
+def test_explicit_wrong_executable_fails_before_waapi_io(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity, waapi
+
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: (_ for _ in ()).throw(
+            process_identity.ProcessIdentityError("identity_mismatch")
+        ),
+    )
+    monkeypatch.setattr(
+        waapi,
+        "get_wwise_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("wrong executable must fail before WAAPI I/O")
+        ),
+    )
+
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_stage"] == "host_identity"
+    assert report["verify"]["failure_type"] == "identity_mismatch"
+
+
+def test_pid_reuse_during_get_info_fails_closed(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity, waapi
+
+    before = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
+    reused = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-2")
+    observations = iter((before, reused))
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: next(observations),
+    )
+    monkeypatch.setattr(
+        waapi,
+        "get_wwise_info",
+        lambda *_args, **_kwargs: {"version": {"displayName": "2024.1.1.8691"}},
+    )
+
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["checks"]["identity"]["success"] is False
+    assert report["verify"]["directly_usable"] is False
+    assert report["verify"]["failure_stage"] == "host_identity"
+    assert report["verify"]["failure_type"] == "identity_mismatch"
 
 
 def test_doctor_rejects_a_remote_endpoint_outside_the_operator_allowlist(monkeypatch, capsys):
@@ -204,7 +403,7 @@ def test_verify_uses_the_same_typed_waapi_contract(monkeypatch, capsys):
 
     monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
 
-    code = cli.main(["verify", "--json"])
+    code = cli.main(["verify", "--json", "--host-pid", "4321"])
 
     report = json.loads(capsys.readouterr().out)
     assert code == 0
@@ -306,7 +505,7 @@ def test_doctor_uses_verify_exit_when_connected_waapi_rejects_the_typed_probe(mo
 
         def call(self, _uri, _arguments, options):
             assert options == {}
-            raise RuntimeError("getInfo is unavailable")
+            raise RuntimeError("getInfo is unavailable token=secret C:/private/project.wproj")
 
         def disconnect(self):
             return True
@@ -319,7 +518,11 @@ def test_doctor_uses_verify_exit_when_connected_waapi_rejects_the_typed_probe(mo
     assert code == 40
     assert report["verify"]["failure_stage"] == "runtime"
     assert report["verify"]["directly_usable"] is False
-    assert "getInfo is unavailable" in report["verify"]["failure_reason"]
+    assert report["verify"]["failure_reason"] == "The WAAPI getInfo RPC failed"
+    assert report["verify"]["failure_type"] == "rpc_failed"
+    assert "getInfo is unavailable" not in json.dumps(report)
+    assert "secret" not in json.dumps(report)
+    assert "private" not in json.dumps(report)
 
 
 def test_doctor_reports_disconnect_failure_as_one_structured_runtime_failure(monkeypatch, capsys):
@@ -334,7 +537,7 @@ def test_doctor_reports_disconnect_failure_as_one_structured_runtime_failure(mon
             return {"version": {"displayName": "2024.1.1.8691"}}
 
         def disconnect(self):
-            raise ValueError("disconnect failed")
+            raise ValueError("disconnect failed certificate=C:/private/client.pem")
 
     monkeypatch.setattr(waapi, "_client_type", lambda: DisconnectingWaapiClient)
 
@@ -348,7 +551,11 @@ def test_doctor_reports_disconnect_failure_as_one_structured_runtime_failure(mon
     assert report["status"] == "failed"
     assert report["verify"]["failure_stage"] == "runtime"
     assert report["verify"]["directly_usable"] is False
-    assert "disconnect failed" in report["verify"]["failure_reason"]
+    assert report["verify"]["failure_reason"] == "The WAAPI probe cleanup failed"
+    assert report["verify"]["failure_type"] == "cleanup_failed"
+    assert "disconnect failed" not in json.dumps(report)
+    assert "certificate" not in json.dumps(report)
+    assert "private" not in json.dumps(report)
 
 
 def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, capsys):
@@ -376,7 +583,7 @@ def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, ca
 
 
 @pytest.mark.parametrize(
-    ("result", "primary_reason"),
+    ("result", "private_detail"),
     [
         (None, "returned no result"),
         ([], "returned a non-object result"),
@@ -384,7 +591,7 @@ def test_doctor_uses_verify_exit_for_a_malformed_runtime_version(monkeypatch, ca
     ],
 )
 def test_malformed_runtime_result_remains_primary_when_disconnect_also_fails(
-    monkeypatch, capsys, result, primary_reason
+    monkeypatch, capsys, result, private_detail
 ):
     from dcc_mcp_wwise import cli, waapi
 
@@ -406,8 +613,10 @@ def test_malformed_runtime_result_remains_primary_when_disconnect_also_fails(
     report = json.loads(capsys.readouterr().out)
     assert code == 40
     assert report["verify"]["failure_stage"] == "runtime"
-    assert primary_reason in report["verify"]["failure_reason"]
-    assert "secondary disconnect failure" not in report["verify"]["failure_reason"]
+    assert report["verify"]["failure_type"] in {"rpc_failed", "invalid_result"}
+    output = json.dumps(report)
+    assert private_detail not in output
+    assert "secondary disconnect failure" not in output
 
 
 @pytest.mark.parametrize(
@@ -489,13 +698,13 @@ def test_doctor_rejects_wwise_below_the_supported_floor(monkeypatch, capsys):
 
 
 def test_doctor_rejects_old_core_before_contacting_waapi(monkeypatch, capsys):
-    from dcc_mcp_wwise import cli, install_contract, waapi
+    from dcc_mcp_wwise import cli, doctor, waapi
 
     class UnexpectedClient:
         def __init__(self, _url, _allow_exception):
             raise AssertionError("old Core must fail before WAAPI connection")
 
-    monkeypatch.setattr(install_contract._core, "__version__", "0.19.85")
+    monkeypatch.setattr(doctor._core, "__version__", "0.20.13")
     monkeypatch.setattr(waapi, "_client_type", lambda: UnexpectedClient)
 
     code = cli.main(["doctor", "--json"])
@@ -504,8 +713,8 @@ def test_doctor_rejects_old_core_before_contacting_waapi(monkeypatch, capsys):
     assert code == 10
     assert report["checks"]["core"] == {
         "success": False,
-        "version": "0.19.85",
-        "minimum": "0.19.86",
+        "version": "0.20.13",
+        "minimum": "0.20.14",
     }
     assert report["verify"]["failure_stage"] == "core"
     assert report["next_steps"][0]["command"][0] == sys.executable

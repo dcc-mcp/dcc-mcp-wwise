@@ -15,7 +15,7 @@ before changing an installation.
 - Audiokinetic Wwise Authoring 2024.1 or newer.
 - **Enable Wwise Authoring API** in **Project > User Preferences**.
 - Python 3.10 or newer outside Wwise.
-- `dcc-mcp-core>=0.19.86,<1.0.0` in the adapter environment.
+- `dcc-mcp-core>=0.20.14,<1.0.0` in the adapter environment.
 - The default loopback endpoint `ws://127.0.0.1:8080/waapi`, or an
   operator-secured remote `wss://` endpoint whose hostname is listed in
   `DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS`.
@@ -50,27 +50,28 @@ after that release gate passes, install the wheel:
 python -m pip install --upgrade dcc-mcp-wwise
 ```
 
-Enable WAAPI in the intended Wwise project, then prove the typed endpoint before
-starting the long-lived service:
+Enable WAAPI in the intended Wwise project. A probe without a PID is deliberately
+preflight-only:
 
 ```text
 dcc-mcp-wwise doctor --json
-dcc-mcp-wwise verify --json
 ```
 
-Start the adapter only after local loopback verification exits `0`. On Windows,
-bind it to the intended Wwise process rather than choosing among multiple
-projects:
+On Windows, independently bind verification and the service to the intended
+Wwise process rather than choosing among multiple projects:
 
 ```powershell
 $wwisePid = (Get-Process Wwise | Where-Object MainWindowTitle -Like '*your-project*').Id
+dcc-mcp-wwise verify --json --host-pid $wwisePid --timeout-ms 5000
 dcc-mcp-wwise --host-pid $wwisePid
 ```
 
 On macOS, use the exact Authoring process PID:
 
 ```text
-dcc-mcp-wwise --host-pid "$(pgrep -x Wwise)"
+wwise_pid="$(pgrep -x Wwise)"
+dcc-mcp-wwise verify --json --host-pid "$wwise_pid" --timeout-ms 5000
+dcc-mcp-wwise --host-pid "$wwise_pid"
 ```
 
 ## Manual path
@@ -95,8 +96,8 @@ Do not broaden the remote allowlist to unrelated hosts. Plaintext remote
 ## Verify
 
 ```text
-dcc-mcp-wwise doctor --json
-dcc-mcp-wwise verify --json
+dcc-mcp-wwise doctor --json --host-pid PID --timeout-ms 5000
+dcc-mcp-wwise verify --json --host-pid PID --timeout-ms 5000
 ```
 
 Both verbs validate endpoint syntax and port, loopback/remote allowlist policy,
@@ -114,7 +115,15 @@ Remote WSS success returns exit `10` with `failure_stage: host_binding` and
 adapter over loopback on the Windows or macOS Wwise host; a remote verifier must
 not claim adapter readiness from `getInfo` alone.
 
-Failures contain `failure_stage`, `failure_reason`, and one machine-executable
+Loopback success without `--host-pid` also returns exit `10`, with
+`failure_type: identity_unavailable`. Exit `0` requires independently observing
+the exact PID, executable name, and process start identity both before and after
+the bounded typed probe. The WAAPI protocol does not currently attest its own
+server PID, so this adapter does not claim that `getInfo` alone proves that
+binding; the ecosystem-level contract remains tracked in
+`dcc-mcp/dcc-mcp-core#2252`.
+
+Failures contain `failure_stage`, `failure_type`, `failure_reason`, and one machine-executable
 `next_steps[].command`. Connection success proves WAAPI is enabled and permits
 the configured client; it does not modify the Wwise project.
 
@@ -135,7 +144,7 @@ before restarting:
 
 ```text
 python -m pip install --upgrade dcc-mcp-wwise
-dcc-mcp-wwise doctor --json
+dcc-mcp-wwise doctor --json --host-pid PID
 ```
 
 Upgrade Wwise separately with Audiokinetic Launcher. The adapter never replaces

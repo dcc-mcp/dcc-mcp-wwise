@@ -4,7 +4,14 @@ import urllib.request
 
 import pytest
 
-from dcc_mcp_wwise import server, waapi
+from dcc_mcp_wwise import process_identity, server, waapi
+
+
+@pytest.fixture
+def bound_identity(monkeypatch):
+    identity = process_identity.WwiseProcessIdentity(os.getpid(), "Wwise.exe", "start-1")
+    monkeypatch.setattr(process_identity, "observe_wwise_process", lambda _pid: identity)
+    return identity
 
 
 def test_resolve_host_pid_auto_selects_only_instance(monkeypatch):
@@ -26,7 +33,32 @@ def test_server_cli_leaves_waapi_url_unset_for_environment_resolution():
     assert args.waapi_url is None
 
 
-def test_server_construction_is_host_bound(monkeypatch, tmp_path):
+def test_server_rejects_an_explicit_pid_without_a_wwise_executable_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("DCC_MCP_GATEWAY_PORT", "0")
+    monkeypatch.setenv("DCC_MCP_REGISTRY_DIR", str(tmp_path / "registry"))
+    monkeypatch.setenv("DCC_MCP_DISABLE_DEFAULT_SKILL_PATHS", "1")
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: (_ for _ in ()).throw(
+            process_identity.ProcessIdentityError("identity_mismatch")
+        ),
+    )
+    monkeypatch.setattr(
+        waapi,
+        "get_wwise_info",
+        lambda _url=None: (_ for _ in ()).throw(
+            AssertionError("identity must fail before WAAPI I/O")
+        ),
+    )
+
+    with pytest.raises(process_identity.ProcessIdentityError) as raised:
+        server.WwiseMcpServer(host_pid=4321)
+
+    assert raised.value.failure_type == "identity_mismatch"
+
+
+def test_server_construction_is_host_bound(monkeypatch, tmp_path, bound_identity):
     monkeypatch.setenv("DCC_MCP_GATEWAY_PORT", "0")
     monkeypatch.setenv("DCC_MCP_REGISTRY_DIR", str(tmp_path / "registry"))
     monkeypatch.setenv("DCC_MCP_DISABLE_DEFAULT_SKILL_PATHS", "1")
@@ -39,7 +71,7 @@ def test_server_construction_is_host_bound(monkeypatch, tmp_path):
     assert instance is not None
 
 
-def test_direct_mcp_can_discover_and_load_project_skill(monkeypatch, tmp_path):
+def test_direct_mcp_can_discover_and_load_project_skill(monkeypatch, tmp_path, bound_identity):
     monkeypatch.setenv("DCC_MCP_GATEWAY_PORT", "0")
     monkeypatch.setenv("DCC_MCP_REGISTRY_DIR", str(tmp_path / "registry"))
     monkeypatch.setenv("DCC_MCP_DISABLE_DEFAULT_SKILL_PATHS", "1")
@@ -106,3 +138,39 @@ def test_direct_mcp_can_discover_and_load_project_skill(monkeypatch, tmp_path):
         assert "wwise_project__ping" in json.dumps(loaded)
     finally:
         instance.stop()
+
+
+def test_server_fails_closed_when_pid_start_identity_changes_during_probe(monkeypatch):
+    before = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
+    reused = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-2")
+    observations = iter((before, reused))
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: next(observations),
+    )
+    monkeypatch.setattr(waapi, "get_wwise_version", lambda _url=None: "2024.1.1.8691")
+
+    with pytest.raises(process_identity.ProcessIdentityError) as raised:
+        server.WwiseMcpServer(host_pid=4321)
+
+    assert raised.value.failure_type == "identity_mismatch"
+
+
+def test_running_server_readiness_rejects_later_pid_reuse(monkeypatch, tmp_path):
+    current = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
+    reused = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-2")
+    observations = iter((current, current, reused))
+    monkeypatch.setenv("DCC_MCP_GATEWAY_PORT", "0")
+    monkeypatch.setenv("DCC_MCP_REGISTRY_DIR", str(tmp_path / "registry"))
+    monkeypatch.setenv("DCC_MCP_DISABLE_DEFAULT_SKILL_PATHS", "1")
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: next(observations),
+    )
+    monkeypatch.setattr(waapi, "get_wwise_version", lambda _url=None: "2024.1.1.8691")
+
+    instance = server.WwiseMcpServer(host_pid=4321)
+
+    assert instance.host_identity_is_current() is False

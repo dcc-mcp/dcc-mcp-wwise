@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev]" "dcc-mcp-core==0.20.14"
       - run: ruff check src tests tools
       - run: ruff format --check src tests tools
       - name: Doctor contract smoke
@@ -41,11 +41,35 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip build twine
+      - run: python -m pip install --upgrade pip build twine uv==0.11.19
+      - run: uv lock --check
       - run: python -m build
       - run: python -m twine check dist/*
+      - run: python tools/verify_wheel.py dist/*.whl
       - name: Wheel entry-point smoke
         run: |
           python -m venv wheel-smoke
-          wheel-smoke/bin/python -m pip install dist/*.whl
+          wheel-smoke/bin/python -m pip install "dcc-mcp-core==0.20.14" dist/*.whl
           wheel-smoke/bin/dcc-mcp-wwise --version
+          set +e
+          wheel-smoke/bin/dcc-mcp-wwise doctor --json --timeout-ms 0 > doctor.json
+          code=$?
+          set -e
+          test "$code" -eq 10
+          wheel-smoke/bin/python -m pip install "jsonschema>=4.17,<5"
+          wheel-smoke/bin/python -c "import json; from jsonschema import Draft202012Validator; from dcc_mcp_core.deployment import load_install_sop_schema; Draft202012Validator(load_install_sop_schema()).validate(json.load(open('doctor.json', encoding='utf-8')))"
+
+  process-boundary:
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]" "dcc-mcp-core==0.20.14"
+      - run: python -m pytest tests/test_waapi_probe.py -q
