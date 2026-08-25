@@ -18,7 +18,7 @@ from dcc_mcp_core import DccServerOptions, HostExecutionBridge
 from dcc_mcp_core.readiness import AdapterReadinessBinder
 from dcc_mcp_core.server_base import DccServerBase
 
-from . import waapi
+from . import process_identity, waapi
 from .__version__ import __version__
 from .dispatcher import WwiseWaapiDispatcher
 from .menu import WwiseMenu
@@ -29,22 +29,33 @@ _LOGGER = logging.getLogger(__name__)
 
 def _detect_wwise_pids() -> list[int]:
     if os.name == "nt":
-        completed = subprocess.run(
-            ["tasklist", "/fo", "csv", "/nh", "/fi", "imagename eq Wwise.exe"],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/fo", "csv", "/nh", "/fi", "imagename eq Wwise.exe"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
         if completed.returncode != 0:
             return []
         rows = csv.reader(io.StringIO(completed.stdout))
         return [int(row[1]) for row in rows if len(row) > 1 and row[0].lower() == "wwise.exe"]
 
-    completed = subprocess.run(
-        ["pgrep", "-x", "Wwise"], check=False, capture_output=True, text=True
-    )
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-x", "Wwise"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
     return [int(value) for value in completed.stdout.split() if value.isdigit()]
 
 
@@ -60,47 +71,6 @@ def _resolve_host_pid(host_pid: int | None) -> int:
     raise ValueError("Multiple Wwise processes were found; pass --host-pid explicitly")
 
 
-def _process_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-        kernel32.WaitForSingleObject.restype = wintypes.DWORD
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.OpenProcess(0x00100000, False, pid)
-        if not handle:
-            error = ctypes.get_last_error()
-            if error == 5:
-                return True
-            if error == 87:
-                return False
-            raise OSError(error, ctypes.FormatError(error))
-        try:
-            result = kernel32.WaitForSingleObject(handle, 0)
-            if result == 258:
-                return True
-            if result == 0:
-                return False
-            raise OSError(ctypes.get_last_error(), "WaitForSingleObject failed")
-        finally:
-            kernel32.CloseHandle(handle)
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 class WwiseMcpServer(DccServerBase):
     """DCC-MCP service backed by Wwise's official loopback WAAPI endpoint."""
 
@@ -111,14 +81,18 @@ class WwiseMcpServer(DccServerBase):
         waapi_url: str | None = None,
     ) -> None:
         resolved_pid = _resolve_host_pid(host_pid)
+        identity_before = process_identity.observe_wwise_process(resolved_pid)
         resolved_url = waapi.resolve_waapi_url(waapi_url)
-        os.environ["DCC_MCP_WWISE_HOST_PID"] = str(resolved_pid)
-        os.environ["DCC_MCP_WWISE_WAAPI_URL"] = resolved_url
 
         try:
             dcc_version = waapi.get_wwise_version(resolved_url)
         except RuntimeError:
             dcc_version = "unknown"
+        identity_after = process_identity.observe_wwise_process(resolved_pid)
+        process_identity.require_same_identity(identity_before, identity_after)
+
+        os.environ["DCC_MCP_WWISE_HOST_PID"] = str(resolved_pid)
+        os.environ["DCC_MCP_WWISE_WAAPI_URL"] = resolved_url
 
         execution_bridge = HostExecutionBridge(
             dispatcher=WwiseWaapiDispatcher(),
@@ -140,6 +114,7 @@ class WwiseMcpServer(DccServerBase):
             execution_bridge=execution_bridge,
         )
         super().__init__(options=options)
+        self._host_identity = identity_after
         self._waapi_url = resolved_url
         self._readiness = AdapterReadinessBinder(self)
         self._readiness_stop = threading.Event()
@@ -153,7 +128,7 @@ class WwiseMcpServer(DccServerBase):
         try:
             self._menu.start()
         except RuntimeError as exc:
-            _LOGGER.warning("Wwise started without the DCC-MCP menu: %s", exc)
+            _LOGGER.warning("Wwise started without the DCC-MCP menu (%s)", type(exc).__name__)
         return handle
 
     def stop(self) -> None:
@@ -178,20 +153,34 @@ class WwiseMcpServer(DccServerBase):
         self._readiness_thread = threading.Thread(
             target=self._monitor_waapi_readiness,
             name="dcc-mcp-wwise-readiness",
-            daemon=True,
+            daemon=False,
         )
         self._readiness_thread.start()
 
     def _monitor_waapi_readiness(self) -> None:
         while not self._readiness_stop.wait(2.0):
-            ready = waapi.is_connected(self._waapi_url)
+            ready = self.host_identity_is_current() and waapi.is_connected(
+                self._waapi_url,
+                timeout_secs=0.5,
+            )
             self._set_waapi_readiness(ready)
+
+    def host_identity_is_current(self) -> bool:
+        """Fail closed if PID, executable, or process start identity changed."""
+        try:
+            observed = process_identity.observe_wwise_process(self._host_identity.pid)
+            process_identity.require_same_identity(self._host_identity, observed)
+        except process_identity.ProcessIdentityError:
+            return False
+        return True
 
     def _stop_readiness_monitor(self) -> None:
         self._readiness_stop.set()
         thread, self._readiness_thread = self._readiness_thread, None
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                raise RuntimeError("The bounded Wwise readiness monitor did not stop")
         self._set_waapi_readiness(False)
 
     def _version_string(self) -> str:
@@ -245,10 +234,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, lambda *_: stopped.set())
 
-    start_server(port=args.mcp_port, host_pid=host_pid, waapi_url=args.waapi_url)
+    try:
+        instance = start_server(port=args.mcp_port, host_pid=host_pid, waapi_url=args.waapi_url)
+    except process_identity.ProcessIdentityError as exc:
+        raise SystemExit("The requested Wwise host identity could not be verified") from exc
     try:
         while not stopped.wait(1.0):
-            if not _process_is_alive(host_pid):
+            if not instance.host_identity_is_current():
                 break
     finally:
         stop_server()

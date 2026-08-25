@@ -52,7 +52,7 @@ def test_call_error_is_not_misreported_as_connection_failure(monkeypatch):
             raise ValueError("bad arguments")
 
     monkeypatch.setattr(waapi, "_client_type", lambda: FailingClient)
-    with pytest.raises(RuntimeError, match=r"^WAAPI call failed"):
+    with pytest.raises(RuntimeError, match=r"^The WAAPI RPC failed$"):
         waapi.call_waapi("ak.wwise.core.soundbank.generate")
 
 
@@ -66,22 +66,15 @@ def test_call_error_remains_primary_when_disconnect_also_fails(monkeypatch):
 
     monkeypatch.setattr(waapi, "_client_type", lambda: FailingClient)
 
-    with pytest.raises(waapi.WaapiCallError, match="primary call failure") as raised:
+    with pytest.raises(waapi.WaapiCallError, match="The WAAPI RPC failed") as raised:
         waapi.call_waapi("ak.wwise.core.soundbank.generate")
 
+    assert "primary call failure" not in str(raised.value)
     assert "secondary disconnect failure" not in str(raised.value)
 
 
-@pytest.mark.parametrize(
-    ("result", "primary_reason"),
-    [
-        (None, "returned no result"),
-        ([], "returned a non-object result"),
-    ],
-)
-def test_malformed_get_info_remains_primary_when_disconnect_also_fails(
-    monkeypatch, result, primary_reason
-):
+@pytest.mark.parametrize("result", [None, []])
+def test_malformed_get_info_is_classified_without_raw_details(monkeypatch, result):
     class MalformedClient(FakeClient):
         def call(self, uri, arguments, options):
             return result
@@ -91,9 +84,11 @@ def test_malformed_get_info_remains_primary_when_disconnect_also_fails(
 
     monkeypatch.setattr(waapi, "_client_type", lambda: MalformedClient)
 
-    with pytest.raises(waapi.WaapiCallError, match=primary_reason) as raised:
-        waapi.get_wwise_info()
+    validator = waapi._require_info_result
+    with pytest.raises(waapi.WaapiCallError) as raised:
+        waapi.call_waapi("ak.wwise.core.getInfo", result_validator=validator)
 
+    assert raised.value.failure_type in {"rpc_failed", "invalid_result"}
     assert "secondary disconnect failure" not in str(raised.value)
 
 

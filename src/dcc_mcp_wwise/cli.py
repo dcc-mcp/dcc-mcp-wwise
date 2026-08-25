@@ -31,6 +31,8 @@ def _doctor_parser(verb: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dcc-mcp-wwise %s" % verb)
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--waapi-url")
+    parser.add_argument("--host-pid", type=int)
+    parser.add_argument("--timeout-ms", type=int, default=5000)
     return parser
 
 
@@ -46,7 +48,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     verb = arguments[0]
     args = _doctor_parser(verb).parse_args(arguments[1:])
-    report = doctor_report(args.waapi_url, verb=verb)
+    report = doctor_report(
+        args.waapi_url,
+        verb=verb,
+        host_pid=args.host_pid,
+        timeout_ms=args.timeout_ms,
+    )
     exit_code = int(report.pop("_exit_code"))
     if args.as_json:
         print(json.dumps(report, sort_keys=True))

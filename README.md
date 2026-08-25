@@ -26,7 +26,7 @@ _Illustrative workflow generated with OpenAI ImageGen from the retained source i
 ## Quick start
 
 Requirements: Wwise 2024.1+ with **Project > User Preferences > Enable Wwise
-Authoring API** enabled, Python 3.10+, and `dcc-mcp-cli` 0.19.86+.
+Authoring API** enabled, Python 3.10+, and `dcc-mcp-core` 0.20.14+.
 
 The PyPI wheel is not published yet, and the pinned Core catalog install block
 is still pending. Do not claim that the following release command works until
@@ -36,14 +36,14 @@ is:
 ```text
 python -m pip install --upgrade dcc-mcp-wwise
 dcc-mcp-wwise doctor --json
-dcc-mcp-wwise verify --json
 ```
 
-After verification returns exit `0`, bind the service to the intended Wwise
-process:
+The PID-less probe is preflight-only. Bind verification and the service to the
+same independently observed Wwise process before claiming readiness:
 
 ```powershell
 $wwisePid = (Get-Process Wwise | Where-Object MainWindowTitle -Like '*your-project*').Id
+dcc-mcp-wwise verify --json --host-pid $wwisePid --timeout-ms 5000
 dcc-mcp-wwise --host-pid $wwisePid
 ```
 

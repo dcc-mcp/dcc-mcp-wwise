@@ -46,12 +46,13 @@ class WwiseMenu:
             client.call("ak.wwise.ui.commands.unregister", {"commands": command_ids}, options={})
             client.call("ak.wwise.ui.commands.register", {"commands": _COMMANDS}, options={})
         except Exception as exc:
+            _LOGGER.debug("Wwise menu registration failed (%s)", type(exc).__name__)
             if client is not None:
                 try:
                     client.disconnect()
-                except Exception:
-                    pass
-            raise RuntimeError(f"Could not register the Wwise DCC-MCP menu: {exc}") from exc
+                except Exception as cleanup_exc:
+                    _LOGGER.debug("Wwise menu cleanup failed (%s)", type(cleanup_exc).__name__)
+            raise RuntimeError("Could not register the Wwise DCC-MCP menu") from exc
         self._client = client
         self._subscription = subscription
 
@@ -69,12 +70,14 @@ class WwiseMenu:
             if subscription is not None:
                 client.unsubscribe(subscription)
         except Exception as exc:
-            _LOGGER.warning("Could not remove the Wwise DCC-MCP menu: %s", exc)
+            _LOGGER.warning("Could not remove the Wwise DCC-MCP menu (%s)", type(exc).__name__)
         finally:
             try:
                 client.disconnect()
             except Exception as exc:
-                _LOGGER.warning("Could not disconnect the Wwise menu client: %s", exc)
+                _LOGGER.warning(
+                    "Could not disconnect the Wwise menu client (%s)", type(exc).__name__
+                )
 
     @staticmethod
     def _handle_command(*_args: Any, **payload: Any) -> None:
