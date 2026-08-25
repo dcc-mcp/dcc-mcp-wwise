@@ -4,6 +4,7 @@ from pathlib import Path
 def test_install_runbook_is_wheel_first_platform_complete_and_honest_about_publication():
     root = Path(__file__).parents[1]
     text = (root / "install.md").read_text(encoding="utf-8")
+    normalized = " ".join(line.lstrip("> ").strip() for line in text.splitlines())
 
     for heading in (
         "## Requirements",
@@ -27,7 +28,11 @@ def test_install_runbook_is_wheel_first_platform_complete_and_honest_about_publi
         assert command in text
     assert "https://raw.githubusercontent.com/dcc-mcp/dcc-mcp-wwise/main/install.md" in text
     assert "DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS" in text
-    assert "PyPI wheel is not published" in text
+    assert "https://pypi.org/pypi/dcc-mcp-wwise/json" in text
+    assert "PyPI Trusted Publisher" in text
+    assert "Core catalog entry is still pending" in normalized
+    assert "not established by repository code" in normalized
+    assert "not been validated against a real Wwise Authoring/WAAPI session" in normalized
     assert "no adapter-managed external binary cache" in text
     assert "Linux remote verification is preflight-only" in text
     assert "Remote WSS success returns exit `10` with `failure_stage: host_binding`" in text
@@ -37,11 +42,14 @@ def test_install_runbook_is_wheel_first_platform_complete_and_honest_about_publi
     assert 'pip install -e ".[dev]"' not in text
 
 
-def test_readme_quick_start_routes_agents_to_doctor_without_claiming_a_published_wheel():
+def test_readme_quick_start_routes_agents_through_live_publication_gates():
     readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
     quick_start = readme.split("## Quick start", 1)[1].split("## Audio showcase", 1)[0]
+    normalized = " ".join(quick_start.split())
 
-    assert "PyPI wheel is not published" in quick_start
+    assert "https://pypi.org/pypi/dcc-mcp-wwise/json" in quick_start
+    assert "Core catalog entry is still pending" in normalized
+    assert "not been validated against a real Wwise Authoring/WAAPI session" in normalized
     assert "dcc-mcp-wwise doctor --json" in quick_start
     assert "dcc-mcp-wwise verify --json" in quick_start
     assert "--host-pid $wwisePid" in quick_start

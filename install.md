@@ -5,10 +5,14 @@ This is the canonical standalone adapter runbook. Agents should read the
 before changing an installation.
 
 > [!IMPORTANT]
-> The PyPI wheel is not published yet, and the Core catalog does not yet carry
-> its pinned install URL and SHA-256. The wheel commands below are the canonical
-> release path only after those publication gates exist. Until then, do not
-> claim that a PyPI or catalog installation succeeded.
+> Do not infer publication from a source version or GitHub tag. Require
+> `https://pypi.org/pypi/dcc-mcp-wwise/json` to resolve the intended non-yanked
+> wheel and sdist before using the PyPI commands below. The Core catalog entry
+> is still pending and must separately land with an immutable URL and SHA-256.
+> PyPI Trusted Publisher configuration is an external repository gate and is
+> not established by repository code; repository CI cannot prove that account
+> configuration. This release workflow has not been validated against a real
+> Wwise Authoring/WAAPI session.
 
 ## Requirements
 
@@ -43,8 +47,10 @@ tracking.
 
 ## Agent quick path
 
-First confirm that the published wheel and pinned Core catalog entry exist. Only
-after that release gate passes, install the wheel:
+First confirm that the PyPI project JSON resolves the intended non-yanked wheel
+and sdist. This is the direct-wheel gate; a Core-managed install must also wait
+for the separate digest-pinned catalog entry. Only after the applicable gate
+passes, install the wheel:
 
 ```text
 python -m pip install --upgrade dcc-mcp-wwise
@@ -139,8 +145,8 @@ dcc-mcp-cli call <returned-tool-slug> --json '{}' --wait
 
 ## Upgrade
 
-Once the wheel is published, stop the adapter, upgrade it, and re-run doctor
-before restarting:
+Once the PyPI project JSON proves that the intended wheel is published, stop
+the adapter, upgrade it, and re-run doctor before restarting:
 
 ```text
 python -m pip install --upgrade dcc-mcp-wwise
@@ -155,7 +161,7 @@ Wwise upgrade.
 
 Stop the adapter first with Ctrl+C or SIGTERM. `stop_server()` unregisters the
 session-scoped **DCC-MCP** menu and disconnects its WAAPI subscription; no Wwise
-user configuration is retained. Then remove the published wheel:
+user configuration is retained. Then remove the installed wheel:
 
 ```text
 python -m pip uninstall dcc-mcp-wwise

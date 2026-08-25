@@ -28,10 +28,14 @@ _Illustrative workflow generated with OpenAI ImageGen from the retained source i
 Requirements: Wwise 2024.1+ with **Project > User Preferences > Enable Wwise
 Authoring API** enabled, Python 3.10+, and `dcc-mcp-core` 0.20.14+.
 
-The PyPI wheel is not published yet, and the pinned Core catalog install block
-is still pending. Do not claim that the following release command works until
-those publication gates exist. Once published, the canonical wheel-first path
-is:
+Do not infer publication from a source version or release tag. Require the
+version-independent [PyPI project JSON](https://pypi.org/pypi/dcc-mcp-wwise/json)
+to resolve the intended non-yanked wheel and sdist before using the command
+below. The Core catalog entry is still pending, so catalog installation must
+remain disabled until Core lands a digest-pinned entry. PyPI Trusted Publisher
+configuration is an external repository gate and is not established by
+repository code. This release workflow has not been validated against a real
+Wwise Authoring/WAAPI session.
 
 ```text
 python -m pip install --upgrade dcc-mcp-wwise
@@ -57,7 +61,7 @@ dcc-mcp-cli describe <returned-tool-slug>
 dcc-mcp-cli call <returned-tool-slug> --json '{}' --wait
 ```
 
-See [install.md](install.md) for publication status, Windows/macOS/Linux setup,
+See [install.md](install.md) for publication gates, Windows/macOS/Linux setup,
 WAAPI endpoint policy, stable doctor exits, upgrade, uninstall, and troubleshooting, and
 [showcase/audio/README.md](showcase/audio/README.md) for the reproducible audio showcase.
 

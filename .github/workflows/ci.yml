@@ -13,6 +13,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-contract:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        core-version: ["0.20.14", "latest"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Install the allowed Core lane
+        env:
+          CORE_VERSION: ${{ matrix.core-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CORE_VERSION" = "latest" ]; then
+            CORE_REQUIREMENT="dcc-mcp-core>=0.20.14,<1.0.0"
+          else
+            CORE_REQUIREMENT="dcc-mcp-core==$CORE_VERSION"
+          fi
+          python -m pip install -e ".[dev]" "$CORE_REQUIREMENT" "waapi-client==0.8.1"
+      - run: python -m pip check
+      - run: python scripts/ci/check_installed_dependencies.py
+      - run: pytest tests/test_doctor.py tests/test_release_contract.py -q
+
   test:
     timeout-minutes: 15
     strategy:
@@ -22,12 +52,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[dev]" "dcc-mcp-core==0.20.14"
-      - run: ruff check src tests tools
-      - run: ruff format --check src tests tools
+      - run: ruff check src tests tools scripts
+      - run: ruff format --check src tests tools scripts
+      - run: python scripts/ci/check_installed_dependencies.py
+      - run: python scripts/ci/check_workflows.py
       - name: Doctor contract smoke
         run: pytest tests/test_doctor.py -q
       - run: pytest
@@ -38,11 +72,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip build twine uv==0.11.19
+      - run: python -m pip install -e ".[dev]" "uv==0.11.19"
+      - run: python scripts/ci/check_uv_lock.py
+      - run: python scripts/ci/check_workflows.py
       - run: uv lock --check
+      - run: python -m pip check
+      - run: python scripts/ci/check_installed_dependencies.py
       - run: python -m build
       - run: python -m twine check dist/*
       - run: python tools/verify_wheel.py dist/*.whl
@@ -68,6 +108,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
