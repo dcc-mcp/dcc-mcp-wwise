@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.3](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.2...v0.1.3) (2026-08-25)
+
+
+### Features
+
+* add standalone Wwise doctor ([094b8df](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/094b8df16d6095d25371b6b738fbd9d92f71b1ab))
+
+
+### Bug Fixes
+
+* harden Wwise doctor runtime checks ([d9cc663](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/d9cc663803d14923327eb89ebeb529b809763fa9))
+* harden Wwise install verification ([373063e](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/373063e400a5a8799d2d660bc3827de619b4c2ad))
+* keep remote Wwise checks preflight ([e1e4517](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/e1e4517bb23cfb9a26c082d5f64ed919e12a75b3))
+* validate Wwise runtime results ([b1e4b12](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/b1e4b12cfc5443b5dee7149f372ca3a875966aef))
+
 ## [0.1.2](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.1...v0.1.2) (2026-08-13)
 
 
