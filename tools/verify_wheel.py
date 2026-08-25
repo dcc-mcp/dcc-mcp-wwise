@@ -8,6 +8,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 
 def _source_version() -> str:
     source = (Path(__file__).parents[1] / "src" / "dcc_mcp_wwise" / "__version__.py").read_text(
@@ -41,13 +43,16 @@ def verify(path: Path) -> None:
         metadata = email.parser.BytesParser().parsebytes(archive.read(metadata_names[0]))
         if metadata["Version"] != _source_version():
             raise SystemExit("wheel metadata and source versions differ")
-        dependencies = metadata.get_all("Requires-Dist", [])
-        if not any(
-            requirement.startswith("dcc-mcp-core<1.0.0,>=0.20.14")
-            or requirement.startswith("dcc-mcp-core>=0.20.14,<1.0.0")
-            for requirement in dependencies
-        ):
+        dependencies = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])]
+        core = [requirement for requirement in dependencies if requirement.name == "dcc-mcp-core"]
+        if len(core) != 1 or str(core[0].specifier) not in {
+            ">=0.20.14,<1.0.0",
+            "<1.0.0,>=0.20.14",
+        }:
             raise SystemExit("wheel does not require formal dcc-mcp-core 0.20.14")
+        waapi = [requirement for requirement in dependencies if requirement.name == "waapi-client"]
+        if len(waapi) != 1 or str(waapi[0].specifier) not in {">=0.8.1,<0.9", "<0.9,>=0.8.1"}:
+            raise SystemExit("wheel does not bind the audited waapi-client 0.8 line")
 
 
 def main(argv: list[str] | None = None) -> int:

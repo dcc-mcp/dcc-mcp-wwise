@@ -79,7 +79,7 @@ def test_root_help_discovers_doctor_verify_and_server_mode(capsys):
 
 
 def test_public_doctor_reports_unreachable_waapi_as_structured_preflight(monkeypatch, capsys):
-    from dcc_mcp_wwise import cli, waapi
+    from dcc_mcp_wwise import __version__, cli, waapi
 
     monkeypatch.setenv("DCC_MCP_WWISE_WAAPI_URL", "ws://127.0.0.1:8080/waapi")
     monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS", raising=False)
@@ -92,7 +92,7 @@ def test_public_doctor_reports_unreachable_waapi_as_structured_preflight(monkeyp
     assert report["schema_version"] == 1
     assert report["status"] == "failed"
     assert report["dcc_type"] == "wwise"
-    assert report["adapter_version"] == "0.1.2"
+    assert report["adapter_version"] == __version__
     assert report["core_version"]
     assert report["receipt_path"] is None
     assert report["checks"]["endpoint"] == {

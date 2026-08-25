@@ -9,8 +9,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   release-please:
@@ -31,32 +30,209 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  publish:
+  verify-release-source:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment:
-      name: pypi
-      url: https://pypi.org/p/dcc-mcp-wwise
+    timeout-minutes: 10
     permissions:
-      contents: write
-      id-token: write
+      contents: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind tag and GitHub Release to the checked-out source
+        id: source
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
+          SOURCE_SHA=$(git rev-parse HEAD)
+          TAG_TYPE=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.type')
+          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
+          RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.target_commitish')
+          test "$TAG_TYPE" = "commit"
+          test "$TAG_SHA" = "$SOURCE_SHA"
+          test "$RELEASE_TARGET" = "$SOURCE_SHA"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build wheel and sdist once
+    needs: [release-please, verify-release-source]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip build twine
-      - run: python -m build
-      - run: python -m twine check dist/*
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - name: Bind build to verified source
+        id: source
+        env:
+          VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
+          SOURCE_SHA=$(git rev-parse HEAD)
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")
+          test "$SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
+          test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Install release validation dependencies
+        run: python -m pip install -e ".[dev]" "uv==0.11.19"
+      - name: Validate release contracts
+        run: |
+          python scripts/ci/check_uv_lock.py
+          python scripts/ci/check_workflows.py
+          uv lock --check
+          python -m pip check
+          pytest
+          python tools/lint_skills.py
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Validate distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m twine check dist/*
+          python tools/verify_wheel.py dist/*.whl
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+      - name: Upload immutable Python distributions
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
-          files: dist/*
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+          name: python-dist-${{ needs.release-please.outputs.tag_name }}-${{ github.run_id }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Record immutable build receipt
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: [release-please, verify-release-source, build]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/dcc-mcp-wwise
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Download immutable Python distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: dist
+          merge-multiple: true
+      - name: Verify immutable identity immediately before PyPI
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          BUILD_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
+          test -n "$ARTIFACT_ID"
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
+          RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.target_commitish')
+          test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
+          test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+      - name: Publish to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
           verbose: true
           print-hash: true
+
+  attach-release-assets:
+    needs: [release-please, verify-release-source, build]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download immutable Python distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: release-assets
+          merge-multiple: true
+      - name: Verify identity and attach assets without clobbering
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          BUILD_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
+          test -n "$ARTIFACT_ID"
+          [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
+          RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.id')
+          RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.target_commitish')
+          test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
+          test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
+          test "$(find release-assets -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2
+          EXISTING=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" --jq '.[].name')
+          for asset in release-assets/*; do
+            name=$(basename "$asset")
+            if grep -Fqx "$name" <<< "$EXISTING"; then
+              echo "::error::existing release asset refuses no-clobber publication: $name"
+              exit 1
+            fi
+          done
+          gh release upload "$TAG_NAME" release-assets/* --repo "$GITHUB_REPOSITORY"
