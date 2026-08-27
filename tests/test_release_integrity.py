@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from scripts.ci.release_integrity import (
+    INCIDENT,
+    RELEASE,
     ArtifactIdentity,
     IncidentIdentity,
     ReleaseIdentity,
@@ -87,6 +89,48 @@ def test_original_artifact_live_api_shape_is_fully_bound(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize(
+    ("field", "valid_value"),
+    [
+        ("id", ORIGINAL_ARTIFACT.artifact_id),
+        ("workflow_run.id", ORIGINAL_ARTIFACT.run_id),
+        ("workflow_run.repository_id", ORIGINAL_ARTIFACT.repository_id),
+        ("workflow_run.head_repository_id", ORIGINAL_ARTIFACT.head_repository_id),
+    ],
+)
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        pytest.param(lambda value: float(value), id="equal-valued-float"),
+        pytest.param(lambda _value: True, id="boolean"),
+        pytest.param(lambda _value: 0, id="zero"),
+        pytest.param(lambda _value: -1, id="negative"),
+        pytest.param(lambda _value: 1 << 63, id="signed-64-overflow"),
+        pytest.param(lambda value: str(value), id="numeric-string"),
+        pytest.param(lambda _value: None, id="null"),
+    ],
+)
+def test_artifact_rejects_non_exact_positive_signed_64_integer_provenance(
+    tmp_path: Path,
+    field: str,
+    valid_value: int,
+    invalid_value: object,
+) -> None:
+    payload = _artifact_payload()
+    value = invalid_value(valid_value)
+    if field == "id":
+        payload["id"] = value
+    else:
+        run = payload["workflow_run"]
+        assert isinstance(run, dict)
+        run[field.removeprefix("workflow_run.")] = value
+    path = tmp_path / "artifact.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact identity fields"):
+        verify_artifact(path, ORIGINAL_ARTIFACT, require_live=True)
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("id", 1),
@@ -144,6 +188,7 @@ def test_incident_run_and_release_live_shapes_are_fully_bound(tmp_path: Path) ->
             {
                 "id": 377552005,
                 "node_id": "RE_kwDOTnYlVs4WgPyF",
+                "name": "v0.1.3",
                 "tag_name": "v0.1.3",
                 "target_commitish": "d921113c14ec1c270897b70d553d1261d7a20fa1",
                 "draft": False,
@@ -176,6 +221,7 @@ def test_incident_run_and_release_live_shapes_are_fully_bound(tmp_path: Path) ->
         ReleaseIdentity(
             release_id=377552005,
             node_id="RE_kwDOTnYlVs4WgPyF",
+            name="v0.1.3",
             tag="v0.1.3",
             target="d921113c14ec1c270897b70d553d1261d7a20fa1",
             draft=False,
@@ -183,6 +229,158 @@ def test_incident_run_and_release_live_shapes_are_fully_bound(tmp_path: Path) ->
             immutable=False,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "remove"),
+    [
+        ("draft", None, True),
+        ("prerelease", None, True),
+        ("immutable", None, True),
+        ("immutable", 0, False),
+        ("draft", 0, False),
+        ("prerelease", 0, False),
+        ("draft", True, False),
+        ("prerelease", True, False),
+        ("immutable", True, False),
+    ],
+)
+def test_recovery_release_state_requires_present_booleans_and_exact_false(
+    tmp_path: Path, field: str, value: object, remove: bool
+) -> None:
+    payload: dict[str, object] = {
+        "id": RELEASE.release_id,
+        "node_id": RELEASE.node_id,
+        "name": "v0.1.4",
+        "tag_name": RELEASE.tag,
+        "target_commitish": RELEASE.target,
+        "draft": False,
+        "prerelease": False,
+        "immutable": False,
+    }
+    if remove:
+        del payload[field]
+    else:
+        payload[field] = value
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="release state"):
+        verify_release(release, RELEASE)
+
+
+def _frozen_incident_payload() -> dict[str, object]:
+    return {
+        "id": INCIDENT.run_id,
+        "node_id": INCIDENT.node_id,
+        "name": INCIDENT.name,
+        "path": INCIDENT.path,
+        "event": INCIDENT.event,
+        "run_attempt": INCIDENT.attempt,
+        "workflow_id": INCIDENT.workflow_id,
+        "head_sha": INCIDENT.head_sha,
+        "status": "completed",
+        "conclusion": "failure",
+        "repository": {
+            "id": INCIDENT.repository_id,
+            "name": INCIDENT.repository_name,
+            "full_name": INCIDENT.repository_full_name,
+            "owner": {"login": INCIDENT.repository_owner},
+        },
+        "head_repository": {
+            "id": INCIDENT.repository_id,
+            "name": INCIDENT.repository_name,
+            "full_name": INCIDENT.repository_full_name,
+            "owner": {"login": INCIDENT.repository_owner},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", 33098798286.0),
+        ("run_attempt", True),
+        ("workflow_id", 331601345.0),
+    ],
+)
+def test_incident_rejects_non_exact_integer_scalars(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    payload = _frozen_incident_payload()
+    payload[field] = value
+    incident = tmp_path / "incident.json"
+    incident.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="incident identity fields"):
+        verify_incident(incident, INCIDENT)
+
+
+@pytest.mark.parametrize("repository_field", ["repository", "head_repository"])
+def test_incident_rejects_non_exact_repository_objects(
+    tmp_path: Path, repository_field: str
+) -> None:
+    payload = _frozen_incident_payload()
+    payload[repository_field] = []
+    incident = tmp_path / "incident.json"
+    incident.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be an object"):
+        verify_incident(incident, INCIDENT)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["node_id", "name", "path", "event", "head_sha", "status", "conclusion"],
+)
+def test_incident_rejects_empty_required_strings(tmp_path: Path, field: str) -> None:
+    payload = _frozen_incident_payload()
+    payload[field] = ""
+    incident = tmp_path / "incident.json"
+    incident.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exact non-empty string"):
+        verify_incident(incident, INCIDENT)
+
+
+def test_recovery_release_binds_exact_name(tmp_path: Path) -> None:
+    payload = {
+        "id": RELEASE.release_id,
+        "node_id": RELEASE.node_id,
+        "name": "decoy-v0.1.4",
+        "tag_name": RELEASE.tag,
+        "target_commitish": RELEASE.target,
+        "draft": False,
+        "prerelease": False,
+        "immutable": False,
+    }
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="frozen identity"):
+        verify_release(release, RELEASE)
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    ["", "RE_", "RE_bad+value", "RE_bad=value", "XX_valid-looking"],
+)
+def test_release_rejects_malformed_github_node_id(tmp_path: Path, node_id: str) -> None:
+    payload = {
+        "id": RELEASE.release_id,
+        "node_id": node_id,
+        "name": RELEASE.name,
+        "tag_name": RELEASE.tag,
+        "target_commitish": RELEASE.target,
+        "draft": False,
+        "prerelease": False,
+        "immutable": False,
+    }
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="release node id"):
+        verify_release(release, RELEASE)
 
 
 def _pypi_payload(distributions: Path) -> dict[str, object]:
