@@ -39,6 +39,10 @@ jobs:
       contents: read
     outputs:
       source_sha: ${{ steps.source.outputs.source_sha }}
+      release_id: ${{ steps.source.outputs.release_id }}
+      release_draft: ${{ steps.source.outputs.release_draft }}
+      release_prerelease: ${{ steps.source.outputs.release_prerelease }}
+      release_immutable: ${{ steps.source.outputs.release_immutable }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -58,11 +62,24 @@ jobs:
           SOURCE_SHA=$(git rev-parse HEAD)
           TAG_TYPE=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.type')
           TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
-          RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.target_commitish')
+          RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
+          RELEASE_ID=$(jq -r '.id' <<< "$RELEASE_JSON")
+          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$RELEASE_JSON")
+          RELEASE_DRAFT=$(jq -r '.draft' <<< "$RELEASE_JSON")
+          RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$RELEASE_JSON")
+          RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$RELEASE_JSON")
           test "$TAG_TYPE" = "commit"
           test "$TAG_SHA" = "$SOURCE_SHA"
           test "$RELEASE_TARGET" = "$SOURCE_SHA"
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          test "$RELEASE_DRAFT" = "false"
+          test "$RELEASE_PRERELEASE" = "false"
+          [[ "$RELEASE_IMMUTABLE" =~ ^(true|false)$ ]]
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "release_draft=$RELEASE_DRAFT" >> "$GITHUB_OUTPUT"
+          echo "release_prerelease=$RELEASE_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "release_immutable=$RELEASE_IMMUTABLE" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build wheel and sdist once
@@ -76,6 +93,7 @@ jobs:
       source_sha: ${{ steps.source.outputs.source_sha }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      manifest_digest: ${{ steps.hashes.outputs.manifest_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -120,6 +138,15 @@ jobs:
           test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+      - name: Create trusted distribution hash manifest
+        id: hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
+          MANIFEST_DIGEST=$(sha256sum dist/SHA256SUMS | awk '{print $1}')
+          [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
       - name: Upload immutable Python distributions
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -128,6 +155,7 @@ jobs:
           path: |
             dist/*.whl
             dist/*.tar.gz
+            dist/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -136,10 +164,12 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          MANIFEST_DIGEST: ${{ steps.hashes.outputs.manifest_digest }}
         run: |
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
           echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"
           echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     needs: [release-please, verify-release-source, build]
@@ -169,19 +199,37 @@ jobs:
           VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
           ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
           ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          MANIFEST_DIGEST: ${{ needs.build.outputs.manifest_digest }}
+          VERIFIED_RELEASE_ID: ${{ needs.verify-release-source.outputs.release_id }}
+          VERIFIED_RELEASE_DRAFT: ${{ needs.verify-release-source.outputs.release_draft }}
+          VERIFIED_RELEASE_PRERELEASE: ${{ needs.verify-release-source.outputs.release_prerelease }}
+          VERIFIED_RELEASE_IMMUTABLE: ${{ needs.verify-release-source.outputs.release_immutable }}
         shell: bash
         run: |
           set -euo pipefail
           test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
           test -n "$ARTIFACT_ID"
           [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum dist/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
+          (cd dist && sha256sum --check SHA256SUMS)
           TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
-          RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.target_commitish')
+          CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
+          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
+          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
           test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
           test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
+          test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
+          test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
+          test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
+          test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
           test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+          test "$(find dist -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
@@ -190,8 +238,10 @@ jobs:
           print-hash: true
 
   attach-release-assets:
-    needs: [release-please, verify-release-source, build]
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please, verify-release-source, build, publish]
+    if: >-
+      needs.release-please.outputs.release_created == 'true' &&
+      needs.publish.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -213,21 +263,38 @@ jobs:
           VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
           ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
           ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          MANIFEST_DIGEST: ${{ needs.build.outputs.manifest_digest }}
+          VERIFIED_RELEASE_ID: ${{ needs.verify-release-source.outputs.release_id }}
+          VERIFIED_RELEASE_DRAFT: ${{ needs.verify-release-source.outputs.release_draft }}
+          VERIFIED_RELEASE_PRERELEASE: ${{ needs.verify-release-source.outputs.release_prerelease }}
+          VERIFIED_RELEASE_IMMUTABLE: ${{ needs.verify-release-source.outputs.release_immutable }}
         shell: bash
         run: |
           set -euo pipefail
           test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
           test -n "$ARTIFACT_ID"
           [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum release-assets/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
+          (cd release-assets && sha256sum --check SHA256SUMS)
           TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
-          RELEASE_ID=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.id')
-          RELEASE_TARGET=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.target_commitish')
+          CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
+          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
+          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
           test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
           test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
+          test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
+          test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
+          test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
+          test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
           test "$(find release-assets -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 2
-          EXISTING=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100" --jq '.[].name')
+          test "$(find release-assets -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
+          EXISTING=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?per_page=100" --jq '.[].name')
           for asset in release-assets/*; do
             name=$(basename "$asset")
             if grep -Fqx "$name" <<< "$EXISTING"; then
@@ -235,4 +302,15 @@ jobs:
               exit 1
             fi
           done
+          CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
+          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
+          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
+          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
+          test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
+          test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
+          test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
+          test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
+          test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
           gh release upload "$TAG_NAME" release-assets/* --repo "$GITHUB_REPOSITORY"
