@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.4](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.3...v0.1.4) (2026-08-27)
+
+
+### Bug Fixes
+
+* flatten release lock artifact extraction ([a3ad92c](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/a3ad92c86e9642a6f300f2682abe671851fb281e))
+* harden release lock synchronization ([75a6bf9](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/75a6bf9d9bb025a05800f9fb59644b2f84f625ff))
+* harden v0.1.3 release recovery ([a903652](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/a903652ab46a7850417069c905d8ee24cd917fb1))
+* recover v0.1.3 publication ([514e21e](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/514e21e61ee6ee8576ce706c50ba326c348b0eaf))
+* restrict recovery dispatch to main ([a3a8f47](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/a3a8f47397d7ecbf17812fa9496c9338a6d2b324))
+
 ## [0.1.3](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.2...v0.1.3) (2026-08-25)
 
 
