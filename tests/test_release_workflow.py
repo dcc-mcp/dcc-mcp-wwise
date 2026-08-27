@@ -116,6 +116,99 @@ def test_release_contract_freezes_checkout_inputs_and_every_run_body() -> None:
         validate_release(document)
 
 
+@pytest.mark.parametrize(
+    "job_name",
+    [
+        "release-please",
+        "verify-release-source",
+        "build",
+        "publish",
+        "attach-release-assets",
+    ],
+)
+def test_release_rejects_unreviewed_runner_drift(job_name: str) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    document["jobs"][job_name]["runs-on"] = ["self-hosted", "release-secrets"]
+
+    with pytest.raises(ValueError, match="exact reviewed job"):
+        validate_release(document)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("container", {"image": "untrusted.example/release:latest"}),
+        ("services", {"proxy": {"image": "untrusted.example/proxy:latest"}}),
+        ("defaults", {"run": {"shell": "bash -e {0}"}}),
+        ("x-decoy", {"if": "always()", "runs-on": "self-hosted"}),
+    ],
+)
+def test_release_rejects_unreviewed_job_execution_controls(field: str, value: object) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    document["jobs"]["publish"][field] = value
+
+    with pytest.raises(ValueError, match="exact reviewed job"):
+        validate_release(document)
+
+
+def test_release_rejects_workflow_defaults_that_change_critical_steps() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    document["defaults"] = {"run": {"shell": "bash -e {0}"}}
+
+    with pytest.raises(ValueError, match="exact reviewed workflow"):
+        validate_release(document)
+
+
+@pytest.mark.parametrize(
+    ("step_index", "field", "value"),
+    [
+        (2, "if", "always()"),
+        (1, "continue-on-error", True),
+        (0, "timeout-minutes", 1),
+        (2, "x-decoy", {"continue-on-error": True}),
+    ],
+)
+def test_release_rejects_unreviewed_step_execution_controls(
+    step_index: int, field: str, value: object
+) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    document["jobs"]["publish"]["steps"][step_index][field] = value
+
+    with pytest.raises(ValueError, match="exact reviewed step"):
+        validate_release(document)
+
+
+@pytest.mark.parametrize(
+    ("path_suffix", "extra_inputs"),
+    [
+        ("\ndist/private/secret.txt", {}),
+        ("\n/etc/shadow", {}),
+        ("\ndist/**", {}),
+        ("", {"include-hidden-files": True}),
+    ],
+)
+def test_release_rejects_broadened_immutable_artifact_inputs(
+    path_suffix: str, extra_inputs: dict[str, object]
+) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    upload = document["jobs"]["build"]["steps"][8]["with"]
+    upload["path"] += path_suffix
+    upload.update(extra_inputs)
+
+    with pytest.raises(ValueError, match="exact reviewed inputs"):
+        validate_release(document)
+
+
 def test_release_consumers_are_bound_to_the_build_artifact_id() -> None:
     from scripts.ci.check_workflows import validate_release
 
