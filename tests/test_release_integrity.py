@@ -10,6 +10,8 @@ from scripts.ci.release_integrity import (
     ArtifactIdentity,
     IncidentIdentity,
     ReleaseIdentity,
+    server_artifact_sha256,
+    upload_artifact_sha256,
     verify_artifact,
     verify_incident,
     verify_pypi_release,
@@ -45,6 +47,36 @@ ORIGINAL_ARTIFACT = ArtifactIdentity(
     head_repository_id=1316365654,
     head_sha="d921113c14ec1c270897b70d553d1261d7a20fa1",
 )
+
+
+def test_server_and_upload_artifact_digests_have_separate_exact_grammars() -> None:
+    digest = "a" * 64
+
+    assert upload_artifact_sha256(digest) == digest
+    assert server_artifact_sha256(f"sha256:{digest}") == digest
+    with pytest.raises(ValueError):
+        upload_artifact_sha256(f"sha256:{digest}")
+    with pytest.raises(ValueError):
+        server_artifact_sha256(digest)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a" * 64,
+        "SHA256:" + "a" * 64,
+        "sha256:" + "A" * 64,
+        "sha256:" + "a" * 64 + " ",
+        " sha256:" + "a" * 64,
+        "sha512:" + "a" * 64,
+    ],
+)
+def test_live_server_artifact_rejects_every_noncanonical_digest(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "artifact.json"
+    path.write_text(json.dumps(_artifact_payload(digest=value)), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="server artifact SHA-256"):
+        verify_artifact(path, ORIGINAL_ARTIFACT, require_live=True)
 
 
 def test_original_artifact_live_api_shape_is_fully_bound(tmp_path: Path) -> None:
