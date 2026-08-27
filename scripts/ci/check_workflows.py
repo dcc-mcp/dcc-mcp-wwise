@@ -84,6 +84,15 @@ BUILD_RECEIPT_LINES = (
     'echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"',
     'echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_STEP_SUMMARY"',
 )
+ARTIFACT_RECAPTURE_LINES = (
+    'CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")',
+    "CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< \"$CURRENT_ARTIFACT_JSON\")",
+    "CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< \"$CURRENT_ARTIFACT_JSON\")",
+    "CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< \"$CURRENT_ARTIFACT_JSON\")",
+    'test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"',
+    'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"',
+    'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
+)
 PYPI_IDENTITY_LINES = (
     "set -euo pipefail",
     'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
@@ -114,6 +123,7 @@ PYPI_IDENTITY_LINES = (
     "test \"$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
     "test \"$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
     'test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2',
+    *ARTIFACT_RECAPTURE_LINES,
 )
 ATTACH_IDENTITY_LINES = (
     "set -euo pipefail",
@@ -152,6 +162,7 @@ ATTACH_IDENTITY_LINES = (
     "exit 1",
     "fi",
     "done",
+    *ARTIFACT_RECAPTURE_LINES,
     "for asset in release-assets/*; do",
     'name=$(basename "$asset")',
     'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
@@ -165,6 +176,8 @@ ATTACH_IDENTITY_LINES = (
     'test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"',
     'test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"',
     'test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"',
+    "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
+    'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
     "ENCODED_NAME=$(jq -rn --arg value \"$name\" '$value | @uri')",
     (
         'gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/'
@@ -550,6 +563,8 @@ def validate_release(document: Mapping[str, Any]) -> None:
         identity = _run(step, f"{label} identity")
         for required in (
             "TAG_SHA=$(gh api",
+            "CURRENT_ARTIFACT_JSON=$(gh api",
+            "CURRENT_ARTIFACT_DIGEST=$(jq",
             "CURRENT_RELEASE_ID=$(jq",
             "CURRENT_RELEASE_IMMUTABLE=$(jq",
             "sha256sum --check",
@@ -577,6 +592,10 @@ def validate_release(document: Mapping[str, Any]) -> None:
     upload_index = attach_run.index("releases/$CURRENT_RELEASE_ID/assets?name=")
     if attach_run.rfind("CURRENT_RELEASE_ID=$(jq", 0, upload_index) < attach_run.index("done"):
         raise ValueError("GitHub Release identity must be recaptured immediately before mutation")
+    if attach_run.rfind("TAG_SHA=$(gh api", 0, upload_index) < attach_run.rfind(
+        "for asset in release-assets/*; do", 0, upload_index
+    ):
+        raise ValueError("GitHub Release tag must be recaptured immediately before each mutation")
 
 
 def validate_ci(document: Mapping[str, Any]) -> None:

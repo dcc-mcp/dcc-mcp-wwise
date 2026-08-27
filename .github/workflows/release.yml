@@ -235,6 +235,13 @@ jobs:
           test "$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2
+          CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
+          CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
+          CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
+          test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
+          test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"
+          test "$CURRENT_ARTIFACT_EXPIRED" = "false"
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
@@ -307,6 +314,13 @@ jobs:
               exit 1
             fi
           done
+          CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
+          CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
+          CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
+          test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
+          test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"
+          test "$CURRENT_ARTIFACT_EXPIRED" = "false"
           for asset in release-assets/*; do
             name=$(basename "$asset")
             CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
@@ -320,6 +334,8 @@ jobs:
             test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
             test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
             test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
+            TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
+            test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
             ENCODED_NAME=$(jq -rn --arg value "$name" '$value | @uri')
             gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
           done
