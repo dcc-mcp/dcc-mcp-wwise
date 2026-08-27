@@ -41,6 +41,107 @@ def _named_step(document, job: str, name: str):
     return next(step for step in document["jobs"][job]["steps"] if step.get("name") == name)
 
 
+def _git(*arguments: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _model_lock_artifact_sync(tmp_path: Path, artifact_files: dict[str, bytes]) -> bytes:
+    """Model download-artifact extraction through the reviewed git push boundary."""
+    document = _lock_sync_document()
+    download = _named_step(document, "sync-release-lock", "Download exact generated lock")
+    checkout = tmp_path / "checkout"
+    remote = tmp_path / "remote.git"
+    checkout.mkdir()
+    _git("init", "--initial-branch=main", cwd=checkout)
+    _git("config", "core.autocrlf", "false", cwd=checkout)
+    _git("config", "user.name", "loonghao", cwd=checkout)
+    _git("config", "user.email", "hal.long@outlook.com", cwd=checkout)
+    (checkout / "uv.lock").write_bytes(b'version = 1\nname = "stale-0.1.3"\n')
+    _git("add", "uv.lock", cwd=checkout)
+    _git("commit", "-m", "initial lock", cwd=checkout)
+    branch = "release-please--branches--main--components--dcc-mcp-wwise"
+    _git("switch", "-c", branch, cwd=checkout)
+    source_sha = _git("rev-parse", "HEAD", cwd=checkout)
+    _git("init", "--bare", str(remote), cwd=tmp_path)
+    _git("remote", "add", "origin", str(remote), cwd=checkout)
+    _git("push", "-u", "origin", branch, cwd=checkout)
+
+    extraction_root = checkout / download["with"]["path"]
+    if not download["with"].get("merge-multiple", False):
+        extraction_root /= "release-lock-12-33060625683"
+    for relative, content in artifact_files.items():
+        target = extraction_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    generated_locks = [
+        content for relative, content in artifact_files.items() if Path(relative).name == "uv.lock"
+    ]
+    if len(generated_locks) != 1:
+        raise ValueError("artifact must contain exactly one generated uv.lock")
+    generated = generated_locks[0]
+    expected_digest = hashlib.sha256(generated).hexdigest()
+    if hashlib.sha256((checkout / "uv.lock").read_bytes()).hexdigest() != expected_digest:
+        raise ValueError("root uv.lock is not the downloaded generated lock")
+    if _git("diff", "--name-only", cwd=checkout) != "uv.lock":
+        raise ValueError("generated lock must be the only tracked diff")
+    if _git("ls-files", "--others", "--exclude-standard", cwd=checkout):
+        raise ValueError("downloaded artifact produced an extra or decoy path")
+    _git("add", "uv.lock", cwd=checkout)
+    if _git("show", ":uv.lock", cwd=checkout).encode() + b"\n" != generated:
+        raise ValueError("staged lock is not the generated lock")
+    _git("commit", "-m", "chore(ci): sync generated release lock", cwd=checkout)
+    if _git("rev-parse", "HEAD^", cwd=checkout) != source_sha:
+        raise ValueError("lock commit lost the exact source head lease")
+    if _git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", cwd=checkout) != "uv.lock":
+        raise ValueError("lock commit contains an extra path")
+    _git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=checkout)
+    return (
+        _git(
+            "--git-dir", str(remote), "show", f"refs/heads/{branch}:uv.lock", cwd=tmp_path
+        ).encode()
+        + b"\n"
+    )
+
+
+def test_downloaded_generated_lock_is_the_exact_root_file_verified_staged_and_pushed(
+    tmp_path: Path,
+) -> None:
+    generated = b'version = 1\nname = "generated-0.1.4"\n'
+
+    assert _model_lock_artifact_sync(tmp_path, {"uv.lock": generated}) == generated
+
+
+def test_downloaded_generated_lock_rejects_a_nested_only_layout(tmp_path: Path) -> None:
+    generated = b'version = 1\nname = "generated-0.1.4"\n'
+
+    with pytest.raises(ValueError, match="root uv.lock"):
+        _model_lock_artifact_sync(tmp_path, {"nested/uv.lock": generated})
+
+
+@pytest.mark.parametrize(
+    "decoy",
+    [
+        "extra.txt",
+        "nested/decoy.txt",
+        "nested/uv.lock",
+    ],
+)
+def test_downloaded_generated_lock_rejects_every_extra_or_decoy_path(
+    tmp_path: Path, decoy: str
+) -> None:
+    generated = b'version = 1\nname = "generated-0.1.4"\n'
+
+    with pytest.raises(ValueError):
+        _model_lock_artifact_sync(tmp_path, {"uv.lock": generated, decoy: b"decoy\n"})
+
+
 def test_recovery_contract_rejects_any_extra_publication_mutation() -> None:
     from scripts.ci.check_workflows import validate_recovery
 

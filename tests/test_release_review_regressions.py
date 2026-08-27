@@ -81,6 +81,45 @@ def test_publishers_canonicalize_bare_and_prefixed_sha256_artifact_digests() -> 
     assert canonical_sha256(f"sha256:{digest}") == digest
 
 
+def test_publisher_shell_normalizers_accept_the_exact_server_digest_format() -> None:
+    digest = "a" * 64
+    server_digest = f"sha256:{digest}"
+    workflow = _load(RELEASE_WORKFLOW)
+    steps = (
+        ("publish", "Verify immutable identity immediately before PyPI"),
+        ("attach-release-assets", "Verify identity and attach assets without clobbering"),
+    )
+
+    for job_name, step_name in steps:
+        run = next(
+            step["run"]
+            for step in workflow["jobs"][job_name]["steps"]
+            if step.get("name") == step_name
+        )
+        completed = _run_digest_normalizer(run, server_digest, digest)
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "SHA256:" + "a" * 64,
+        "sha256:" + "A" * 64,
+        "sha256:" + "a" * 64 + " ",
+        "sha256:" + "a" * 64 + ":decoy",
+    ],
+)
+def test_publisher_shell_normalizers_reject_noncanonical_server_digests(value: str) -> None:
+    workflow = _load(RELEASE_WORKFLOW)
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["publish"]["steps"]
+        if step.get("name") == "Verify immutable identity immediately before PyPI"
+    )
+
+    assert _run_digest_normalizer(run, value, "a" * 64).returncode != 0
+
+
 @pytest.mark.parametrize(
     "value",
     [

@@ -541,6 +541,7 @@ def validate_lock_sync(document: Mapping[str, Any]) -> None:
             "with": {
                 "artifact-ids": "${{ needs.generate-release-lock.outputs.artifact_id }}",
                 "path": ".",
+                "merge-multiple": True,
             },
         },
         {
