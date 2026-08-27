@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,10 @@ def _recovery_document():
     return _release_document()
 
 
+def _named_step(document, job: str, name: str):
+    return next(step for step in document["jobs"][job]["steps"] if step.get("name") == name)
+
+
 def test_recovery_contract_rejects_any_extra_publication_mutation() -> None:
     from scripts.ci.check_workflows import validate_recovery
 
@@ -54,9 +59,37 @@ def test_recovery_source_is_immutably_frozen_after_review() -> None:
 
     source = (ROOT / ".github/workflows/release.yml").read_bytes()
     validate_recovery_source(source)
+    validate_recovery_source(source.replace(b"\n", b"\r\n"))
 
     with pytest.raises(ValueError, match="exact reviewed source digest"):
         validate_recovery_source(source + b"\n# decoy\n")
+
+    with pytest.raises(ValueError, match="portable line endings"):
+        validate_recovery_source(source.replace(b"\n", b"\r"))
+
+
+def test_release_security_sources_are_checked_out_with_portable_lf() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert ".github/workflows/*.yml text eol=lf" in attributes
+    assert "scripts/ci/*.py text eol=lf" in attributes
+    assert "tools/*.py text eol=lf" in attributes
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["scripts/ci/release_integrity.py", "tools/verify_release_archives.py"],
+)
+def test_release_helper_source_freeze_accepts_lf_and_crlf_but_rejects_changes(
+    relative: str,
+) -> None:
+    from scripts.ci.check_workflows import validate_frozen_source
+
+    source = (ROOT / relative).read_bytes()
+    expected = hashlib.sha256(source).hexdigest()
+    validate_frozen_source(source, expected, relative)
+    validate_frozen_source(source.replace(b"\n", b"\r\n"), expected, relative)
+    with pytest.raises(ValueError, match="exact reviewed source digest"):
+        validate_frozen_source(source + b"# semantic change\n", expected, relative)
 
 
 def test_release_contract_ignores_comment_decoys_but_rejects_real_clobber() -> None:
@@ -248,7 +281,9 @@ def test_release_consumers_are_bound_to_the_build_artifact_id() -> None:
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    document["jobs"]["publish"]["steps"][0]["with"]["artifact-ids"] = "1"
+    _named_step(document, "publish", "Download immutable Python distributions")["with"][
+        "artifact-ids"
+    ] = "1"
 
     with pytest.raises(ValueError, match="exact build artifact ID"):
         validate_release(document)
@@ -258,7 +293,7 @@ def test_release_rejects_warning_only_download_hash_verification() -> None:
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    identity = document["jobs"]["publish"]["steps"][1]
+    identity = _named_step(document, "publish", "Verify immutable identity immediately before PyPI")
     identity["run"] = identity["run"].replace(
         "(cd release-bundle && sha256sum --check SHA256SUMS)",
         '(cd release-bundle && sha256sum --check SHA256SUMS) || echo "::warning::digest mismatch"',
@@ -273,12 +308,10 @@ def test_release_rejects_warning_only_server_artifact_digest(job_name: str) -> N
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    identity = document["jobs"][job_name]["steps"][1]
-    identity["run"] = identity["run"].replace(
-        'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
-        'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256" '
-        '|| echo "::warning::server digest mismatch"',
+    preflight = _named_step(
+        document, job_name, "Recapture exact artifact provenance before download"
     )
+    preflight["run"] += '\ntrue || echo "::warning::server digest mismatch"\n'
 
     with pytest.raises(ValueError, match="closed mutation surface"):
         validate_release(document)
@@ -288,7 +321,9 @@ def test_release_rejects_missing_per_asset_tag_recapture() -> None:
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    attach = document["jobs"]["attach-release-assets"]["steps"][1]
+    attach = _named_step(
+        document, "attach-release-assets", "Verify identity and attach assets without clobbering"
+    )
     loop_start = attach["run"].rfind("for asset in release-assets/*; do")
     prefix = attach["run"][:loop_start]
     loop = attach["run"][loop_start:]
@@ -313,7 +348,9 @@ def test_release_rejects_untrusted_or_missing_manifest_digest() -> None:
         validate_release(document)
 
     document = _release_document()
-    del document["jobs"]["publish"]["steps"][1]["env"]["MANIFEST_DIGEST"]
+    del _named_step(document, "publish", "Verify immutable identity immediately before PyPI")[
+        "env"
+    ]["MANIFEST_DIGEST"]
     with pytest.raises(ValueError, match="exact identity step binding"):
         validate_release(document)
 
@@ -338,7 +375,9 @@ def test_release_rejects_missing_final_release_state_recapture() -> None:
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    attach = document["jobs"]["attach-release-assets"]["steps"][1]
+    attach = _named_step(
+        document, "attach-release-assets", "Verify identity and attach assets without clobbering"
+    )
     marker = 'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")'
     first, second = attach["run"].split(marker, 1)
     attach["run"] = first + marker + second.replace(marker, "", 1)
@@ -380,7 +419,7 @@ def test_release_rejects_a_decoy_pypi_upload_in_the_identity_step() -> None:
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    identity = document["jobs"]["publish"]["steps"][1]
+    identity = _named_step(document, "publish", "Verify immutable identity immediately before PyPI")
     identity["run"] += "\npython -m twine upload dist/*\n"
 
     with pytest.raises(ValueError, match="closed mutation surface"):
@@ -405,7 +444,7 @@ def test_release_rejects_same_line_suffixes_on_authoritative_gh_api(
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    identity = document["jobs"]["publish"]["steps"][1]
+    identity = _named_step(document, "publish", "Verify immutable identity immediately before PyPI")
     authoritative = (
         "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')"
     )
@@ -415,13 +454,14 @@ def test_release_rejects_same_line_suffixes_on_authoritative_gh_api(
         validate_release(document)
 
 
-def test_release_ignores_comments_but_rejects_echo_decoys_in_identity_step() -> None:
+def test_release_rejects_comment_and_echo_decoys_in_identity_step() -> None:
     from scripts.ci.check_workflows import validate_release
 
     document = _release_document()
-    identity = document["jobs"]["publish"]["steps"][1]
+    identity = _named_step(document, "publish", "Verify immutable identity immediately before PyPI")
     identity["run"] += "\n# inert TAG_SHA=$(gh api decoy)\n"
-    validate_release(document)
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
 
     identity["run"] += "\necho 'TAG_SHA=$(gh api decoy)'\n"
     with pytest.raises(ValueError, match="closed mutation surface"):
@@ -507,11 +547,6 @@ def test_lock_sync_rejects_duplicate_or_reordered_steps() -> None:
             "build",
             2,
             'TAG_SHA=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")',
-        ),
-        (
-            "attach-release-assets",
-            1,
-            "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
         ),
     ],
 )

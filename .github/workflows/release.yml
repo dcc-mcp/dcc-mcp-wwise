@@ -17,6 +17,10 @@ on:
         required: true
         type: string
         default: "377552005"
+      release_node_id:
+        required: true
+        type: string
+        default: RE_kwDOTnYlVs4WgPyF
       original_run_id:
         required: true
         type: string
@@ -29,6 +33,14 @@ on:
         required: true
         type: string
         default: 9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c
+      original_artifact_name:
+        required: true
+        type: string
+        default: python-dist-v0.1.3-33037251075
+      original_artifact_node_id:
+        required: true
+        type: string
+        default: MDg6QXJ0aWZhY3Q5NjMyNDc0MjMw
       manifest_digest:
         required: true
         type: string
@@ -81,6 +93,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.source.outputs.source_sha }}
       release_id: ${{ steps.source.outputs.release_id }}
+      release_node_id: ${{ steps.source.outputs.release_node_id }}
       release_draft: ${{ steps.source.outputs.release_draft }}
       release_prerelease: ${{ steps.source.outputs.release_prerelease }}
       release_immutable: ${{ steps.source.outputs.release_immutable }}
@@ -105,6 +118,7 @@ jobs:
           TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
           RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
           RELEASE_ID=$(jq -r '.id' <<< "$RELEASE_JSON")
+          RELEASE_NODE_ID=$(jq -r '.node_id' <<< "$RELEASE_JSON")
           RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$RELEASE_JSON")
           RELEASE_DRAFT=$(jq -r '.draft' <<< "$RELEASE_JSON")
           RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$RELEASE_JSON")
@@ -113,11 +127,13 @@ jobs:
           test "$TAG_SHA" = "$SOURCE_SHA"
           test "$RELEASE_TARGET" = "$SOURCE_SHA"
           [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_NODE_ID" =~ ^RE_[A-Za-z0-9_]+$ ]]
           test "$RELEASE_DRAFT" = "false"
           test "$RELEASE_PRERELEASE" = "false"
           [[ "$RELEASE_IMMUTABLE" =~ ^(true|false)$ ]]
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "release_node_id=$RELEASE_NODE_ID" >> "$GITHUB_OUTPUT"
           echo "release_draft=$RELEASE_DRAFT" >> "$GITHUB_OUTPUT"
           echo "release_prerelease=$RELEASE_PRERELEASE" >> "$GITHUB_OUTPUT"
           echo "release_immutable=$RELEASE_IMMUTABLE" >> "$GITHUB_OUTPUT"
@@ -176,6 +192,7 @@ jobs:
           set -euo pipefail
           python -m twine check dist/*
           python tools/verify_wheel.py dist/*.whl
+          python tools/verify_release_archives.py dist/*.whl dist/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto
           test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
@@ -225,6 +242,25 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Recapture exact artifact provenance before download
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          ARTIFACT_NAME: python-dist-${{ needs.release-please.outputs.tag_name }}-${{ github.run_id }}
+          VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+          python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "$ARTIFACT_NAME" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
       - name: Download immutable Python distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -242,6 +278,7 @@ jobs:
           ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
           MANIFEST_DIGEST: ${{ needs.build.outputs.manifest_digest }}
           VERIFIED_RELEASE_ID: ${{ needs.verify-release-source.outputs.release_id }}
+          VERIFIED_RELEASE_NODE_ID: ${{ needs.verify-release-source.outputs.release_node_id }}
           VERIFIED_RELEASE_DRAFT: ${{ needs.verify-release-source.outputs.release_draft }}
           VERIFIED_RELEASE_PRERELEASE: ${{ needs.verify-release-source.outputs.release_prerelease }}
           VERIFIED_RELEASE_IMMUTABLE: ${{ needs.verify-release-source.outputs.release_immutable }}
@@ -285,14 +322,10 @@ jobs:
           test "$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2
-          CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
-          CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
-          test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
-          CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")
-          test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"
-          test "$CURRENT_ARTIFACT_EXPIRED" = "false"
+          python tools/verify_release_archives.py release-bundle/*.whl release-bundle/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+          python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
+          test "$(jq -r '.node_id' <<< "$CURRENT_RELEASE_JSON")" = "$VERIFIED_RELEASE_NODE_ID"
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
@@ -311,6 +344,25 @@ jobs:
       actions: read
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Recapture exact artifact provenance before download
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          ARTIFACT_NAME: python-dist-${{ needs.release-please.outputs.tag_name }}-${{ github.run_id }}
+          VERIFIED_SOURCE_SHA: ${{ needs.verify-release-source.outputs.source_sha }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+          python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "$ARTIFACT_NAME" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
       - name: Download immutable Python distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -328,6 +380,7 @@ jobs:
           ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
           MANIFEST_DIGEST: ${{ needs.build.outputs.manifest_digest }}
           VERIFIED_RELEASE_ID: ${{ needs.verify-release-source.outputs.release_id }}
+          VERIFIED_RELEASE_NODE_ID: ${{ needs.verify-release-source.outputs.release_node_id }}
           VERIFIED_RELEASE_DRAFT: ${{ needs.verify-release-source.outputs.release_draft }}
           VERIFIED_RELEASE_PRERELEASE: ${{ needs.verify-release-source.outputs.release_prerelease }}
           VERIFIED_RELEASE_IMMUTABLE: ${{ needs.verify-release-source.outputs.release_immutable }}
@@ -366,6 +419,7 @@ jobs:
           test "$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
+          python tools/verify_release_archives.py release-assets/*.whl release-assets/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto
           EXISTING=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?per_page=100" --jq '.[].name')
           for asset in release-assets/*; do
             name=$(basename "$asset")
@@ -374,14 +428,8 @@ jobs:
               exit 1
             fi
           done
-          CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
-          CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
-          test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
-          CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")
-          test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"
-          test "$CURRENT_ARTIFACT_EXPIRED" = "false"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+          python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
           for asset in release-assets/*; do
             name=$(basename "$asset")
             CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
@@ -390,6 +438,7 @@ jobs:
             CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
             CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
             CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
+            test "$(jq -r '.node_id' <<< "$CURRENT_RELEASE_JSON")" = "$VERIFIED_RELEASE_NODE_ID"
             test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
             test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
             test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
@@ -397,6 +446,8 @@ jobs:
             test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
             TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
             test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
+            python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
             ENCODED_NAME=$(jq -rn --arg value "$name" '$value | @uri')
             gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
           done
@@ -409,125 +460,133 @@ jobs:
       contents: read
     outputs:
       source_sha: ${{ steps.source.outputs.source_sha }}
-      release_id: ${{ steps.source.outputs.release_id }}
-      release_draft: ${{ steps.source.outputs.release_draft }}
-      release_prerelease: ${{ steps.source.outputs.release_prerelease }}
-      release_immutable: ${{ steps.source.outputs.release_immutable }}
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
-      manifest_digest: ${{ steps.hashes.outputs.manifest_digest }}
+      manifest_digest: ${{ steps.select.outputs.manifest_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout the immutable publication source separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
+          path: tag-source
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-      - name: Bind the recovery build to the frozen incident
+      - name: Bind the recovery to the frozen incident and original artifact
         id: source
         env:
           GH_HOST: github.com
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ inputs.tag }}
-          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
-          EXPECTED_RELEASE_ID: ${{ inputs.release_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_NODE_ID: ${{ inputs.release_node_id }}
           ORIGINAL_RUN_ID: ${{ inputs.original_run_id }}
           ORIGINAL_ARTIFACT_ID: ${{ inputs.original_artifact_id }}
           ORIGINAL_ARTIFACT_DIGEST: ${{ inputs.original_artifact_digest }}
+          ORIGINAL_ARTIFACT_NAME: ${{ inputs.original_artifact_name }}
+          ORIGINAL_ARTIFACT_NODE_ID: ${{ inputs.original_artifact_node_id }}
           ORIGINAL_MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
-          EXPECTED_RELEASE_DRAFT: ${{ inputs.release_draft }}
-          EXPECTED_RELEASE_PRERELEASE: ${{ inputs.release_prerelease }}
-          EXPECTED_RELEASE_IMMUTABLE: ${{ inputs.release_immutable }}
         shell: bash
         run: |
           set -euo pipefail
-          canonical_artifact_sha256() {
-            if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            else
-              return 1
-            fi
-          }
           test "$TAG_NAME" = "v0.1.3"
-          test "$EXPECTED_SOURCE_SHA" = "d921113c14ec1c270897b70d553d1261d7a20fa1"
-          test "$EXPECTED_RELEASE_ID" = "377552005"
+          test "$SOURCE_SHA" = "d921113c14ec1c270897b70d553d1261d7a20fa1"
+          test "$RELEASE_ID" = "377552005"
+          test "$RELEASE_NODE_ID" = "RE_kwDOTnYlVs4WgPyF"
           test "$ORIGINAL_RUN_ID" = "33037251075"
           test "$ORIGINAL_ARTIFACT_ID" = "9632474230"
-          ORIGINAL_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ORIGINAL_ARTIFACT_DIGEST")
-          test "$ORIGINAL_ARTIFACT_SHA256" = "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c"
-          [[ "$ORIGINAL_MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          test "$ORIGINAL_ARTIFACT_DIGEST" = "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c"
+          test "$ORIGINAL_ARTIFACT_NAME" = "python-dist-v0.1.3-33037251075"
+          test "$ORIGINAL_ARTIFACT_NODE_ID" = "MDg6QXJ0aWZhY3Q5NjMyNDc0MjMw"
           test "$ORIGINAL_MANIFEST_DIGEST" = "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815"
-          test "$EXPECTED_RELEASE_DRAFT" = "false"
-          test "$EXPECTED_RELEASE_PRERELEASE" = "false"
-          test "$EXPECTED_RELEASE_IMMUTABLE" = "false"
-          git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
-          SOURCE_SHA=$(git rev-parse HEAD)
-          LOCAL_TAG_SHA=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")
-          TAG_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME")
-          TAG_TYPE=$(jq -r '.object.type' <<< "$TAG_JSON")
-          TAG_SHA=$(jq -r '.object.sha' <<< "$TAG_JSON")
-          RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
-          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$RELEASE_JSON")
-          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$RELEASE_JSON")
-          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$RELEASE_JSON")
-          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$RELEASE_JSON")
-          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$RELEASE_JSON")
-          RUN_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID")
-          CURRENT_RUN_ID=$(jq -r '.id' <<< "$RUN_JSON")
-          RUN_HEAD_SHA=$(jq -r '.head_sha' <<< "$RUN_JSON")
-          RUN_CONCLUSION=$(jq -r '.conclusion' <<< "$RUN_JSON")
-          test "$SOURCE_SHA" = "$EXPECTED_SOURCE_SHA"
-          test "$LOCAL_TAG_SHA" = "$EXPECTED_SOURCE_SHA"
-          test "$TAG_TYPE" = "commit"
-          test "$TAG_SHA" = "$EXPECTED_SOURCE_SHA"
-          test "$CURRENT_RELEASE_ID" = "$EXPECTED_RELEASE_ID"
-          test "$RELEASE_TARGET" = "$EXPECTED_SOURCE_SHA"
-          test "$CURRENT_RELEASE_DRAFT" = "$EXPECTED_RELEASE_DRAFT"
-          test "$CURRENT_RELEASE_PRERELEASE" = "$EXPECTED_RELEASE_PRERELEASE"
-          test "$CURRENT_RELEASE_IMMUTABLE" = "$EXPECTED_RELEASE_IMMUTABLE"
-          test "$CURRENT_RUN_ID" = "$ORIGINAL_RUN_ID"
-          test "$RUN_HEAD_SHA" = "$EXPECTED_SOURCE_SHA"
-          test "$RUN_CONCLUSION" = "failure"
+          test "$(git -C tag-source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID" > incident.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ORIGINAL_ARTIFACT_ID" > original-artifact.json
+          python scripts/ci/release_integrity.py release release.json
+          python scripts/ci/release_integrity.py incident incident.json
+          python scripts/ci/release_integrity.py original-artifact original-artifact.json --allow-expired
+          if test "$(jq -r '.expired' original-artifact.json)" = "false"; then
+            echo "original_live=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "original_live=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-          echo "release_id=$CURRENT_RELEASE_ID" >> "$GITHUB_OUTPUT"
-          echo "release_draft=$CURRENT_RELEASE_DRAFT" >> "$GITHUB_OUTPUT"
-          echo "release_prerelease=$CURRENT_RELEASE_PRERELEASE" >> "$GITHUB_OUTPUT"
-          echo "release_immutable=$CURRENT_RELEASE_IMMUTABLE" >> "$GITHUB_OUTPUT"
+      - name: Download the exact original incident artifact
+        if: steps.source.outputs.original_live == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ inputs.original_artifact_id }}
+          path: original-bundle
+          merge-multiple: true
       - name: Install build validation dependencies
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e "./tag-source[dev]"
       - name: Build wheel and sdist from the immutable tag
-        run: python -m build
-      - name: Validate recovery distributions
-        shell: bash
+        run: python -m build tag-source --outdir dist
+      - name: Validate tag-built distributions
         run: |
-          set -euo pipefail
           python -m twine check dist/*
-          python tools/verify_wheel.py dist/*.whl
-          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
-      - name: Create recovery distribution hash manifest
-        id: hashes
+          python tools/verify_release_archives.py dist/*.whl dist/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.3 4d1384d71b05cf17339fc1362522c822f92c1cf1adda39bb46aacb6ae1b43afb cc97c04166328cd00ecb8d5e579a163ffcbda7f1f705cb7f118d34503cb4fa87
+      - name: Prefer the original artifact or prove the expiry fallback identical
+        id: select
+        env:
+          ORIGINAL_LIVE: ${{ steps.source.outputs.original_live }}
         shell: bash
         run: |
           set -euo pipefail
           (cd dist && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
-          MANIFEST_DIGEST=$(sha256sum dist/SHA256SUMS | awk '{print $1}')
+          test "$(sha256sum dist/dcc_mcp_wwise-0.1.3.tar.gz | awk '{print $1}')" = "041a9fc768066c5c9c9427e827de951d3bc3b252bf9189549217dbe6be027d1b"
+          mkdir selected-dist
+          if test "$ORIGINAL_LIVE" = "true"; then
+            test "$(find original-bundle -maxdepth 1 -type f | wc -l)" -eq 3
+            test "$(sha256sum original-bundle/SHA256SUMS | awk '{print $1}')" = "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815"
+            (cd original-bundle && sha256sum --check SHA256SUMS)
+            python tools/verify_release_archives.py original-bundle/*.whl original-bundle/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.3 4d1384d71b05cf17339fc1362522c822f92c1cf1adda39bb46aacb6ae1b43afb cc97c04166328cd00ecb8d5e579a163ffcbda7f1f705cb7f118d34503cb4fa87
+            cp original-bundle/* selected-dist/
+          elif test "$ORIGINAL_LIVE" = "false"; then
+            cp dist/* selected-dist/
+          else
+            exit 1
+          fi
+          MANIFEST_DIGEST=$(sha256sum selected-dist/SHA256SUMS | awk '{print $1}')
           [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
-      - name: Upload immutable recovery distributions
+      - name: Recapture frozen identity before recovery artifact upload
+        env:
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ORIGINAL_RUN_ID: ${{ inputs.original_run_id }}
+          ORIGINAL_ARTIFACT_ID: ${{ inputs.original_artifact_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID" > incident.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ORIGINAL_ARTIFACT_ID" > original-artifact.json
+          python scripts/ci/release_integrity.py release release.json
+          python scripts/ci/release_integrity.py incident incident.json
+          python scripts/ci/release_integrity.py original-artifact original-artifact.json --allow-expired
+      - name: Upload the selected immutable recovery distributions
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: recovery-python-dist-v0.1.3-${{ github.run_id }}
           path: |
-            dist/*.whl
-            dist/*.tar.gz
-            dist/SHA256SUMS
+            selected-dist/*.whl
+            selected-dist/*.tar.gz
+            selected-dist/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -545,6 +604,39 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout the immutable publication source separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: tag-source
+      - name: Recapture incident and selected artifact before download
+        env: &recovery-env
+          GH_HOST: github.com
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.recovery-build.outputs.source_sha }}
+          ARTIFACT_ID: ${{ needs.recovery-build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.recovery-build.outputs.artifact_digest }}
+          MANIFEST_DIGEST: ${{ needs.recovery-build.outputs.manifest_digest }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        shell: bash
+        run: &recapture-recovery |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}" > release.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ inputs.original_run_id }}" > incident.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ inputs.original_artifact_id }}" > original-artifact.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > selected-artifact.json
+          python scripts/ci/release_integrity.py release release.json
+          python scripts/ci/release_integrity.py incident incident.json
+          python scripts/ci/release_integrity.py original-artifact original-artifact.json --allow-expired
+          python scripts/ci/release_integrity.py artifact selected-artifact.json --id "$ARTIFACT_ID" --name "recovery-python-dist-v0.1.3-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$GITHUB_SHA"
       - name: Download immutable recovery distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -553,85 +645,33 @@ jobs:
           merge-multiple: true
       - name: Verify recovery identity immediately before PyPI
         id: identity
-        env:
-          GH_HOST: github.com
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ inputs.tag }}
-          VERIFIED_SOURCE_SHA: ${{ needs.recovery-build.outputs.source_sha }}
-          VERIFIED_RELEASE_ID: ${{ needs.recovery-build.outputs.release_id }}
-          VERIFIED_RELEASE_DRAFT: ${{ needs.recovery-build.outputs.release_draft }}
-          VERIFIED_RELEASE_PRERELEASE: ${{ needs.recovery-build.outputs.release_prerelease }}
-          VERIFIED_RELEASE_IMMUTABLE: ${{ needs.recovery-build.outputs.release_immutable }}
-          ARTIFACT_ID: ${{ needs.recovery-build.outputs.artifact_id }}
-          ARTIFACT_DIGEST: ${{ needs.recovery-build.outputs.artifact_digest }}
-          MANIFEST_DIGEST: ${{ needs.recovery-build.outputs.manifest_digest }}
-          EXPECTED_RUN_ID: ${{ github.run_id }}
+        env: *recovery-env
         shell: bash
         run: |
           set -euo pipefail
-          canonical_artifact_sha256() {
-            if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            else
-              return 1
-            fi
-          }
-          ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")
-          [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           test "$(sha256sum release-bundle/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           (cd release-bundle && sha256sum --check SHA256SUMS)
-          test "$(find release-bundle -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
-          test "$(find release-bundle -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find release-bundle -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
           test "$(find release-bundle -maxdepth 1 -type f | wc -l)" -eq 3
+          python tools/verify_release_archives.py release-bundle/*.whl release-bundle/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.3 4d1384d71b05cf17339fc1362522c822f92c1cf1adda39bb46aacb6ae1b43afb cc97c04166328cd00ecb8d5e579a163ffcbda7f1f705cb7f118d34503cb4fa87
           mkdir pypi-dist
           cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/
-          test "$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
-          test "$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2
-          CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
-          CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
-          ARTIFACT_RUN_ID=$(jq -r '.workflow_run.id' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")
-          test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
-          test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"
-          test "$CURRENT_ARTIFACT_EXPIRED" = "false"
-          test "$ARTIFACT_RUN_ID" = "$EXPECTED_RUN_ID"
-          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
-          CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
-          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
-          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
-          test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
-          test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
-          test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
-          test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
-          test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
-          test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
+          gh api "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}" > release.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ inputs.original_run_id }}" > incident.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ inputs.original_artifact_id }}" > original-artifact.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > selected-artifact.json
+          python scripts/ci/release_integrity.py release release.json
+          python scripts/ci/release_integrity.py incident incident.json
+          python scripts/ci/release_integrity.py original-artifact original-artifact.json --allow-expired
+          python scripts/ci/release_integrity.py artifact selected-artifact.json --id "$ARTIFACT_ID" --name "recovery-python-dist-v0.1.3-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
           PYPI_JSON=$(mktemp)
           PYPI_STATUS=$(curl --silent --show-error --location --output "$PYPI_JSON" --write-out '%{http_code}' https://pypi.org/pypi/dcc-mcp-wwise/0.1.3/json)
           if test "$PYPI_STATUS" = "404"; then
             echo "publish_required=true" >> "$GITHUB_OUTPUT"
           elif test "$PYPI_STATUS" = "200"; then
-            test "$(jq -r '.info.version' "$PYPI_JSON")" = "0.1.3"
-            test "$(jq '.urls | length' "$PYPI_JSON")" -eq 2
-            test "$(jq '[.urls[] | select(.packagetype == "bdist_wheel" or .packagetype == "sdist")] | length' "$PYPI_JSON")" -eq 2
-            for distribution in pypi-dist/*; do
-              name=$(basename "$distribution")
-              LOCAL_SHA256=$(sha256sum "$distribution" | awk '{print $1}')
-              test "$(jq --arg name "$name" '[.urls[] | select(.filename == $name)] | length' "$PYPI_JSON")" -eq 1
-              PYPI_SHA256=$(jq -r --arg name "$name" '.urls[] | select(.filename == $name) | .digests.sha256' "$PYPI_JSON")
-              test "$PYPI_SHA256" = "$LOCAL_SHA256"
-            done
+            python scripts/ci/release_integrity.py pypi "$PYPI_JSON" pypi-dist
             echo "publish_required=false" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::unexpected PyPI metadata status: $PYPI_STATUS"
             exit 1
           fi
       - name: Publish recovery distributions with Trusted Publishing
@@ -653,6 +693,21 @@ jobs:
       actions: read
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout the immutable publication source separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: tag-source
+      - name: Recapture incident and selected artifact before download
+        env: *recovery-env
+        shell: bash
+        run: *recapture-recovery
       - name: Download immutable recovery distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -660,101 +715,37 @@ jobs:
           path: release-assets
           merge-multiple: true
       - name: Verify recovery identity and attach exact assets idempotently
-        env:
-          GH_HOST: github.com
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ inputs.tag }}
-          VERIFIED_SOURCE_SHA: ${{ needs.recovery-build.outputs.source_sha }}
-          VERIFIED_RELEASE_ID: ${{ needs.recovery-build.outputs.release_id }}
-          VERIFIED_RELEASE_DRAFT: ${{ needs.recovery-build.outputs.release_draft }}
-          VERIFIED_RELEASE_PRERELEASE: ${{ needs.recovery-build.outputs.release_prerelease }}
-          VERIFIED_RELEASE_IMMUTABLE: ${{ needs.recovery-build.outputs.release_immutable }}
-          ARTIFACT_ID: ${{ needs.recovery-build.outputs.artifact_id }}
-          ARTIFACT_DIGEST: ${{ needs.recovery-build.outputs.artifact_digest }}
-          MANIFEST_DIGEST: ${{ needs.recovery-build.outputs.manifest_digest }}
-          EXPECTED_RUN_ID: ${{ github.run_id }}
+        env: *recovery-env
         shell: bash
         run: |
           set -euo pipefail
-          canonical_artifact_sha256() {
-            if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            else
-              return 1
-            fi
-          }
-          ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")
-          [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           test "$(sha256sum release-assets/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           (cd release-assets && sha256sum --check SHA256SUMS)
-          test "$(find release-assets -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
-          test "$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find release-assets -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
-          CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
-          CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
-          ARTIFACT_RUN_ID=$(jq -r '.workflow_run.id' <<< "$CURRENT_ARTIFACT_JSON")
-          CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")
-          test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
-          test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"
-          test "$CURRENT_ARTIFACT_EXPIRED" = "false"
-          test "$ARTIFACT_RUN_ID" = "$EXPECTED_RUN_ID"
-          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
-          CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
-          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
-          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
-          test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
-          test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
-          test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
-          test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
-          test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
-          test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
+          python tools/verify_release_archives.py release-assets/*.whl release-assets/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.3 4d1384d71b05cf17339fc1362522c822f92c1cf1adda39bb46aacb6ae1b43afb cc97c04166328cd00ecb8d5e579a163ffcbda7f1f705cb7f118d34503cb4fa87
           for asset in release-assets/*; do
             name=$(basename "$asset")
             LOCAL_SHA256=$(sha256sum "$asset" | awk '{print $1}')
-            ASSETS_JSON=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$VERIFIED_RELEASE_ID/assets?per_page=100")
+            ASSETS_JSON=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}/assets?per_page=100")
             ASSET_MATCH_COUNT=$(jq --arg name "$name" '[.[][] | select(.name == $name)] | length' <<< "$ASSETS_JSON")
             if test "$ASSET_MATCH_COUNT" -eq 1; then
               EXISTING_ASSET_ID=$(jq -r --arg name "$name" '.[][] | select(.name == $name) | .id' <<< "$ASSETS_JSON")
-              EXISTING_PATH="$RUNNER_TEMP/existing-release-asset"
-              gh api --header "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$EXISTING_ASSET_ID" > "$EXISTING_PATH"
-              EXISTING_SHA256=$(sha256sum "$EXISTING_PATH" | awk '{print $1}')
-              test "$EXISTING_SHA256" = "$LOCAL_SHA256"
+              gh api --header "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$EXISTING_ASSET_ID" > existing-asset
+              test "$(sha256sum existing-asset | awk '{print $1}')" = "$LOCAL_SHA256"
               continue
             fi
             test "$ASSET_MATCH_COUNT" -eq 0
-            CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
-            CURRENT_ARTIFACT_ID=$(jq -r '.id' <<< "$CURRENT_ARTIFACT_JSON")
-            CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< "$CURRENT_ARTIFACT_JSON")
-            CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< "$CURRENT_ARTIFACT_JSON")
-            ARTIFACT_RUN_ID=$(jq -r '.workflow_run.id' <<< "$CURRENT_ARTIFACT_JSON")
-            CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")
-            test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"
-            test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"
-            test "$CURRENT_ARTIFACT_EXPIRED" = "false"
-            test "$ARTIFACT_RUN_ID" = "$EXPECTED_RUN_ID"
-            CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
-            CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
-            RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
-            CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
-            CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
-            CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
-            TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
-            test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
-            test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
-            test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
-            test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
-            test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
-            test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
-            ASSETS_JSON=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?per_page=100")
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
+            gh api "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}" > release.json
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ inputs.original_run_id }}" > incident.json
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ inputs.original_artifact_id }}" > original-artifact.json
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > selected-artifact.json
+            python scripts/ci/release_integrity.py release release.json
+            python scripts/ci/release_integrity.py incident incident.json
+            python scripts/ci/release_integrity.py original-artifact original-artifact.json --allow-expired
+            python scripts/ci/release_integrity.py artifact selected-artifact.json --id "$ARTIFACT_ID" --name "recovery-python-dist-v0.1.3-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$GITHUB_SHA"
+            ASSETS_JSON=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}/assets?per_page=100")
             test "$(jq --arg name "$name" '[.[][] | select(.name == $name)] | length' <<< "$ASSETS_JSON")" -eq 0
             ENCODED_NAME=$(jq -rn --arg value "$name" '$value | @uri')
-            gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
+            gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
           done
