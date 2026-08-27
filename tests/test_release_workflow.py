@@ -140,6 +140,42 @@ def test_release_rejects_warning_only_download_hash_verification() -> None:
         validate_release(document)
 
 
+@pytest.mark.parametrize("job_name", ["publish", "attach-release-assets"])
+def test_release_rejects_warning_only_server_artifact_digest(job_name: str) -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    identity = document["jobs"][job_name]["steps"][1]
+    identity["run"] = identity["run"].replace(
+        'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"',
+        'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST" '
+        '|| echo "::warning::server digest mismatch"',
+    )
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
+def test_release_rejects_missing_per_asset_tag_recapture() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    attach = document["jobs"]["attach-release-assets"]["steps"][1]
+    loop_start = attach["run"].rfind("for asset in release-assets/*; do")
+    prefix = attach["run"][:loop_start]
+    loop = attach["run"][loop_start:]
+    loop = loop.replace(
+        'TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" '
+        "--jq '.object.sha')\n",
+        "",
+        1,
+    ).replace('test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"\n', "", 1)
+    attach["run"] = prefix + loop
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
 def test_release_rejects_untrusted_or_missing_manifest_digest() -> None:
     from scripts.ci.check_workflows import validate_release
 

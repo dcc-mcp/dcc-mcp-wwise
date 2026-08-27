@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shlex
+import subprocess
 from glob import glob
 from pathlib import Path
 from shutil import copy2
@@ -16,6 +18,75 @@ LOCK_SYNC_WORKFLOW = ROOT / ".github" / "workflows" / "release-please-lock-sync.
 
 def _load(path: Path):
     return yaml_loads(path.read_text(encoding="utf-8"))
+
+
+def _run_workflow_guard(run: str, expected: str, environment: dict[str, str]) -> int:
+    command = next(
+        (line.strip() for line in run.splitlines() if line.strip() == expected),
+        "true",
+    )
+    for name, value in environment.items():
+        command = command.replace(f'"${name}"', shlex.quote(value))
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=False,
+    )
+    return completed.returncode
+
+
+def test_asset_publication_stops_on_a_mid_loop_tag_move() -> None:
+    workflow = _load(RELEASE_WORKFLOW)
+    attach_run = workflow["jobs"]["attach-release-assets"]["steps"][1]["run"]
+    asset_loop = attach_run.rsplit("for asset in release-assets/*; do", 1)[-1]
+    guard = 'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"'
+    verified = "a" * 40
+    uploads: list[str] = []
+
+    for asset, current_tag in (
+        ("adapter.whl", verified),
+        ("adapter.tar.gz", "b" * 40),
+        ("SHA256SUMS", "b" * 40),
+    ):
+        if _run_workflow_guard(
+            asset_loop,
+            guard,
+            {"TAG_SHA": current_tag, "VERIFIED_SOURCE_SHA": verified},
+        ):
+            break
+        uploads.append(asset)
+
+    assert uploads == ["adapter.whl"]
+    tag_lookup = (
+        "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')"
+    )
+    post = "releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME"
+    assert asset_loop.index(tag_lookup) < asset_loop.index(guard) < asset_loop.index(post)
+
+
+def test_publishers_reject_mismatched_server_artifact_digest() -> None:
+    workflow = _load(RELEASE_WORKFLOW)
+    expected_digest = "sha256:" + "a" * 64
+    mismatched_digest = "sha256:" + "b" * 64
+    guard = 'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"'
+    metadata_lookup = (
+        'CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")'
+    )
+
+    for job_name in ("publish", "attach-release-assets"):
+        identity_run = workflow["jobs"][job_name]["steps"][1]["run"]
+        assert (
+            _run_workflow_guard(
+                identity_run,
+                guard,
+                {
+                    "ARTIFACT_DIGEST": expected_digest,
+                    "CURRENT_ARTIFACT_DIGEST": mismatched_digest,
+                },
+            )
+            != 0
+        )
+        assert metadata_lookup in identity_run
+        assert identity_run.index(metadata_lookup) < identity_run.index(guard)
 
 
 def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
