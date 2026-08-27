@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sync-release-lock:
-    name: Sync generated release lock
+  generate-release-lock:
+    name: Generate release lock without credentials
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: >-
@@ -28,13 +28,19 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'release-please--branches--main') &&
       startsWith(github.event.pull_request.title, 'chore(main): release ')
     permissions:
-      contents: write
+      contents: read
       pull-requests: read
+    outputs:
+      changed: ${{ steps.state.outputs.changed }}
+      source_sha: ${{ steps.state.outputs.source_sha }}
+      lock_sha256: ${{ steps.state.outputs.lock_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.ref }}
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
@@ -42,18 +48,93 @@ jobs:
         run: |
           python -m pip install "uv==0.11.19"
           uv lock
-      - name: Commit the generated lock only when needed
+      - name: Recapture exact event, head, and diff
+        id: state
         env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          REMOTE_HEAD=$(git ls-remote --exit-code origin "refs/heads/$HEAD_REF" | awk '{print $1}')
+          test "$REMOTE_HEAD" = "$EXPECTED_HEAD_SHA"
           if git diff --quiet -- uv.lock; then
             echo "uv.lock is already synchronized."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "source_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          test "$(git diff --name-only)" = "uv.lock"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
+          LOCK_SHA256=$(sha256sum uv.lock | awk '{print $1}')
+          [[ "$LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "lock_sha256=$LOCK_SHA256" >> "$GITHUB_OUTPUT"
+      - name: Upload exact generated lock
+        if: steps.state.outputs.changed == 'true'
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-lock-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: uv.lock
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  sync-release-lock:
+    name: Sync generated release lock
+    needs: generate-release-lock
+    if: needs.generate-release-lock.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.generate-release-lock.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download exact generated lock
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.generate-release-lock.outputs.artifact_id }}
+          path: .
+      - name: Recapture and commit the exact lock only
+        env:
+          EXPECTED_HEAD_SHA: ${{ needs.generate-release-lock.outputs.source_sha }}
+          EXPECTED_LOCK_SHA256: ${{ needs.generate-release-lock.outputs.lock_sha256 }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_HEAD_SHA" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          REMOTE_HEAD=$(git ls-remote --exit-code origin "refs/heads/$HEAD_REF" | awk '{print $1}')
+          test "$REMOTE_HEAD" = "$EXPECTED_HEAD_SHA"
+          [[ "$EXPECTED_LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum uv.lock | awk '{print $1}')" = "$EXPECTED_LOCK_SHA256"
+          test "$(git diff --name-only)" = "uv.lock"
+          test -z "$(git diff --cached --name-only)"
+          test -z "$(git ls-files --others --exclude-standard)"
           git config user.name "loonghao"
           git config user.email "hal.long@outlook.com"
           git add uv.lock
           git commit -m "chore(ci): sync generated release lock"
-          git push origin "HEAD:${HEAD_REF}"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_HEAD_SHA"
+          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = "uv.lock"
+      - name: Push the recaptured lock commit
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          WRITE_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUTH_HEADER=$(printf 'x-access-token:%s' "$WRITE_TOKEN" | /usr/bin/base64 -w 0)
+          unset WRITE_TOKEN
+          /usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= -c http.proxy= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH_HEADER" push "https://github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$HEAD_REF"

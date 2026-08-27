@@ -82,6 +82,81 @@ def test_release_consumers_are_bound_to_the_build_artifact_id() -> None:
         validate_release(document)
 
 
+def test_release_rejects_warning_only_download_hash_verification() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    identity = document["jobs"]["publish"]["steps"][1]
+    identity["run"] = identity["run"].replace(
+        "(cd dist && sha256sum --check SHA256SUMS)",
+        '(cd dist && sha256sum --check SHA256SUMS) || echo "::warning::digest mismatch"',
+    )
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
+def test_release_rejects_untrusted_or_missing_manifest_digest() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    document["jobs"]["build"]["outputs"]["manifest_digest"] = "decoy"
+    with pytest.raises(ValueError, match="trusted hash manifest"):
+        validate_release(document)
+
+    document = _release_document()
+    del document["jobs"]["publish"]["steps"][1]["env"]["MANIFEST_DIGEST"]
+    with pytest.raises(ValueError, match="exact identity step binding"):
+        validate_release(document)
+
+
+def test_release_rejects_assets_that_can_run_without_successful_pypi() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    document["jobs"]["attach-release-assets"]["needs"].remove("publish")
+    with pytest.raises(ValueError, match="successful PyPI"):
+        validate_release(document)
+
+    document = _release_document()
+    document["jobs"]["attach-release-assets"]["if"] = (
+        "needs.release-please.outputs.release_created == 'true'"
+    )
+    with pytest.raises(ValueError, match="PyPI publication fails"):
+        validate_release(document)
+
+
+def test_release_rejects_missing_final_release_state_recapture() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    attach = document["jobs"]["attach-release-assets"]["steps"][1]
+    marker = 'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")'
+    first, second = attach["run"].split(marker, 1)
+    attach["run"] = first + marker + second.replace(marker, "", 1)
+
+    with pytest.raises(ValueError, match="closed mutation surface"):
+        validate_release(document)
+
+
+def test_lock_sync_rejects_write_credentials_outside_final_push() -> None:
+    from scripts.ci.check_workflows import validate_lock_sync
+
+    document = _lock_sync_document()
+    generation = document["jobs"]["generate-release-lock"]
+    generation["steps"][0]["with"]["token"] = "${{ secrets.PERSONAL_ACCESS_TOKEN }}"
+
+    with pytest.raises(ValueError, match="credential-free"):
+        validate_lock_sync(document)
+
+    document = _lock_sync_document()
+    document["jobs"]["generate-release-lock"]["env"] = {
+        "GH_TOKEN": "${{ secrets.PERSONAL_ACCESS_TOKEN }}"
+    }
+    with pytest.raises(ValueError, match="credential-free job surface"):
+        validate_lock_sync(document)
+
+
 def test_release_rejects_an_indirect_github_upload_in_the_authoritative_step() -> None:
     from scripts.ci.check_workflows import validate_release
 
@@ -150,7 +225,7 @@ def test_lock_sync_rejects_broad_or_additional_staging() -> None:
 
     for replacement in ("git add .", "git add -A", "git add uv.lock README.md"):
         document = _lock_sync_document()
-        commit = document["jobs"]["sync-release-lock"]["steps"][-1]
+        commit = document["jobs"]["sync-release-lock"]["steps"][2]
         commit["run"] = commit["run"].replace("git add uv.lock", replacement)
 
         with pytest.raises(ValueError, match="closed mutation surface"):
@@ -228,7 +303,7 @@ def test_lock_sync_rejects_duplicate_or_reordered_steps() -> None:
         (
             "attach-release-assets",
             1,
-            "RELEASE_ID=$(gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME\" --jq '.id')",
+            "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
         ),
     ],
 )
