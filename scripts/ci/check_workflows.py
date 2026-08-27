@@ -21,9 +21,9 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
-RECOVERY_WORKFLOW_SHA256 = "402fd8e96cf571ad50f9911b8eaaa836447ca4b070c2384931d2f0efe9c3cd31"
-RELEASE_SEMANTIC_SHA256 = "5e0f71b001166ac15ef61430a2f8623b583c182f4c4fcd9f839cb20f80244ed0"
-RELEASE_INTEGRITY_SHA256 = "cf721dd336c03ba681439fd78b715f47e3f559869a00fea624ecf60b64c8f63d"
+RECOVERY_WORKFLOW_SHA256 = "7669fa832317c04ab6bd839a699981697ff6a28c0235cfaa197772da683d4b40"
+RELEASE_SEMANTIC_SHA256 = "607065fdc949a9d2f2c3f9ef1565c393284248f777ba7e686030873ce7425c5b"
+RELEASE_INTEGRITY_SHA256 = "41d7f5dd539bf2c2df02f37a19783f5132e2ff15bf4bbde634fc6c39bdc51e64"
 ARCHIVE_VALIDATOR_SHA256 = "31b77b7fad89a8813e25d78bbcfa303853509d852db03320335707c002da9433"
 SURFACE_ERROR = (
     "closed recovery mutation surface; clobber; exactly one GitHub Release upload mutation; "
@@ -104,15 +104,22 @@ ARTIFACT_RECAPTURE_LINES = (
     "CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< \"$CURRENT_ARTIFACT_JSON\")",
     "CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< \"$CURRENT_ARTIFACT_JSON\")",
     'test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"',
-    'CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")',
+    'CURRENT_ARTIFACT_SHA256=$(server_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")',
     'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
     'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
 )
-ARTIFACT_DIGEST_NORMALIZER_LINES = (
-    "canonical_artifact_sha256() {",
+UPLOAD_ARTIFACT_DIGEST_LINES = (
+    "upload_artifact_sha256() {",
     'if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then',
     "printf '%s\\n' \"${BASH_REMATCH[1]}\"",
-    'elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then',
+    "else",
+    "return 1",
+    "fi",
+    "}",
+)
+SERVER_ARTIFACT_DIGEST_LINES = (
+    "server_artifact_sha256() {",
+    'if [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then',
     "printf '%s\\n' \"${BASH_REMATCH[1]}\"",
     "else",
     "return 1",
@@ -121,10 +128,11 @@ ARTIFACT_DIGEST_NORMALIZER_LINES = (
 )
 PYPI_IDENTITY_LINES = (
     "set -euo pipefail",
-    *ARTIFACT_DIGEST_NORMALIZER_LINES,
+    *UPLOAD_ARTIFACT_DIGEST_LINES,
+    *SERVER_ARTIFACT_DIGEST_LINES,
     'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test -n "$ARTIFACT_ID"',
-    'ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")',
+    'ARTIFACT_SHA256=$(upload_artifact_sha256 "$ARTIFACT_DIGEST")',
     '[[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
     'test "$(sha256sum release-bundle/SHA256SUMS | awk \'{print $1}\')" = "$MANIFEST_DIGEST"',
     "(cd release-bundle && sha256sum --check SHA256SUMS)",
@@ -154,10 +162,11 @@ PYPI_IDENTITY_LINES = (
 )
 ATTACH_IDENTITY_LINES = (
     "set -euo pipefail",
-    *ARTIFACT_DIGEST_NORMALIZER_LINES,
+    *UPLOAD_ARTIFACT_DIGEST_LINES,
+    *SERVER_ARTIFACT_DIGEST_LINES,
     'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test -n "$ARTIFACT_ID"',
-    'ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")',
+    'ARTIFACT_SHA256=$(upload_artifact_sha256 "$ARTIFACT_DIGEST")',
     '[[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
     'test "$(sha256sum release-assets/SHA256SUMS | awk \'{print $1}\')" = "$MANIFEST_DIGEST"',
     "(cd release-assets && sha256sum --check SHA256SUMS)",
@@ -235,6 +244,11 @@ LOCK_STATE_RUN = (
     'echo "source_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"\n'
     'echo "lock_sha256=$LOCK_SHA256" >> "$GITHUB_OUTPUT"\n'
 )
+LOCK_PREPARE_RUN = (
+    "set -euo pipefail\n"
+    'python scripts/ci/sync_release_lock.py prepare --staging "$LOCK_STAGING"\n'
+    'test ! -e "$SERVER_JSON"\n'
+)
 LOCK_COMMIT_RUN = (
     "set -euo pipefail\n"
     'test "$EXPECTED_HEAD_SHA" = "${{ github.event.pull_request.head.sha }}"\n'
@@ -242,6 +256,18 @@ LOCK_COMMIT_RUN = (
     "REMOTE_HEAD=$(git ls-remote --exit-code origin \"refs/heads/$HEAD_REF\" | awk '{print $1}')\n"
     'test "$REMOTE_HEAD" = "$EXPECTED_HEAD_SHA"\n'
     '[[ "$EXPECTED_LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]]\n'
+    'gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$SERVER_JSON"\n'
+    "python scripts/ci/sync_release_lock.py install \\\n"
+    '  --staging "$LOCK_STAGING" \\\n'
+    "  --destination uv.lock \\\n"
+    '  --server-json "$SERVER_JSON" \\\n'
+    '  --artifact-id "$ARTIFACT_ID" \\\n'
+    '  --artifact-name "$ARTIFACT_NAME" \\\n'
+    '  --upload-digest "$EXPECTED_ARTIFACT_DIGEST" \\\n'
+    '  --lock-digest "$EXPECTED_LOCK_SHA256" \\\n'
+    '  --source-sha "$EXPECTED_HEAD_SHA" \\\n'
+    '  --run-id "$GITHUB_RUN_ID" \\\n'
+    '  --repository-id "$REPOSITORY_ID"\n'
     'test "$(sha256sum uv.lock | awk \'{print $1}\')" = "$EXPECTED_LOCK_SHA256"\n'
     'test "$(git diff --name-only)" = "uv.lock"\n'
     'test -z "$(git diff --cached --name-only)"\n'
@@ -257,9 +283,17 @@ LOCK_PUSH_RUN = (
     "set -euo pipefail\n"
     "AUTH_HEADER=$(printf 'x-access-token:%s' \"$WRITE_TOKEN\" | /usr/bin/base64 -w 0)\n"
     "unset WRITE_TOKEN\n"
+    '[[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]\n'
+    'test "$(git rev-parse HEAD^)" = "$EXPECTED_HEAD_SHA"\n'
+    "REMOTE_HEAD=$(/usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= "
+    '-c http.proxy= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic '
+    '$AUTH_HEADER" ls-remote --exit-code "https://github.com/$GITHUB_REPOSITORY.git" '
+    "\"refs/heads/$HEAD_REF\" | awk '{print $1}')\n"
+    'test "$REMOTE_HEAD" = "$EXPECTED_HEAD_SHA"\n'
     "/usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= -c http.proxy= "
     '-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH_HEADER" '
-    'push "https://github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$HEAD_REF"\n'
+    'push --force-with-lease="refs/heads/$HEAD_REF:$EXPECTED_HEAD_SHA" '
+    '"https://github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$HEAD_REF"\n'
 )
 
 
@@ -521,6 +555,7 @@ def validate_lock_sync(document: Mapping[str, Any]) -> None:
         "source_sha": "${{ steps.state.outputs.source_sha }}",
         "lock_sha256": "${{ steps.state.outputs.lock_sha256 }}",
         "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
+        "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
     }
     if generate.get("outputs") != expected_outputs:
         raise ValueError("lock generation must expose only recaptured immutable outputs")
@@ -536,20 +571,45 @@ def validate_lock_sync(document: Mapping[str, Any]) -> None:
             },
         },
         {
+            "uses": SETUP_PYTHON,
+            "with": {"python-version": "3.12"},
+        },
+        {
+            "name": "Prepare empty lock staging",
+            "env": {
+                "LOCK_STAGING": "${{ runner.temp }}/release-lock-artifact",
+                "SERVER_JSON": "${{ runner.temp }}/release-lock-artifact.json",
+            },
+            "shell": "bash",
+            "run": LOCK_PREPARE_RUN,
+        },
+        {
             "name": "Download exact generated lock",
             "uses": DOWNLOAD_ARTIFACT,
             "with": {
                 "artifact-ids": "${{ needs.generate-release-lock.outputs.artifact_id }}",
-                "path": ".",
+                "path": "${{ runner.temp }}/release-lock-artifact",
                 "merge-multiple": True,
             },
         },
         {
             "name": "Recapture and commit the exact lock only",
             "env": {
+                "GH_HOST": "github.com",
+                "GH_TOKEN": "${{ github.token }}",
+                "ARTIFACT_ID": "${{ needs.generate-release-lock.outputs.artifact_id }}",
+                "ARTIFACT_NAME": (
+                    "release-lock-${{ github.event.pull_request.number }}-${{ github.run_id }}"
+                ),
+                "EXPECTED_ARTIFACT_DIGEST": (
+                    "${{ needs.generate-release-lock.outputs.artifact_digest }}"
+                ),
                 "EXPECTED_HEAD_SHA": "${{ needs.generate-release-lock.outputs.source_sha }}",
                 "EXPECTED_LOCK_SHA256": ("${{ needs.generate-release-lock.outputs.lock_sha256 }}"),
                 "HEAD_REF": "${{ github.event.pull_request.head.ref }}",
+                "LOCK_STAGING": "${{ runner.temp }}/release-lock-artifact",
+                "REPOSITORY_ID": "${{ github.repository_id }}",
+                "SERVER_JSON": "${{ runner.temp }}/release-lock-artifact.json",
             },
             "shell": "bash",
             "run": LOCK_COMMIT_RUN,
@@ -557,6 +617,7 @@ def validate_lock_sync(document: Mapping[str, Any]) -> None:
         {
             "name": "Push the recaptured lock commit",
             "env": {
+                "EXPECTED_HEAD_SHA": "${{ needs.generate-release-lock.outputs.source_sha }}",
                 "HEAD_REF": "${{ github.event.pull_request.head.ref }}",
                 "WRITE_TOKEN": "${{ secrets.PERSONAL_ACCESS_TOKEN }}",
             },

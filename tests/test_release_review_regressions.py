@@ -12,7 +12,7 @@ from dcc_mcp_core import yaml_loads
 from twine.exceptions import InvalidDistribution
 from twine.package import PackageFile
 
-from scripts.ci.release_integrity import canonical_sha256
+from scripts.ci.release_integrity import server_artifact_sha256, upload_artifact_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -54,16 +54,13 @@ def _run_workflow_guard(run: str, expected: str, environment: dict[str, str]) ->
     return completed.returncode
 
 
-def _run_digest_normalizer(
-    run: str, value: str, expected: str
+def _run_digest_parser(
+    run: str, function: str, value: str, expected: str
 ) -> subprocess.CompletedProcess[bytes]:
-    marker = 'ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")'
-    _, separator, _ = run.partition(marker)
-    assert separator, "publisher must canonicalize the build artifact digest"
-    function_start = run.index("canonical_artifact_sha256() {")
+    function_start = run.index(f"{function}() {{")
     function_end = run.index("\n}\n", function_start) + 3
-    assertion = 'normalized=$(canonical_artifact_sha256 {}); test "$normalized" = {}\n'.format(
-        shlex.quote(value), shlex.quote(expected)
+    assertion = 'normalized=$({} {}); test "$normalized" = {}\n'.format(
+        function, shlex.quote(value), shlex.quote(expected)
     )
     script = run[function_start:function_end] + "\n" + assertion
     script = script.replace("\r", "")
@@ -75,15 +72,14 @@ def _run_digest_normalizer(
     )
 
 
-def test_publishers_canonicalize_bare_and_prefixed_sha256_artifact_digests() -> None:
+def test_python_artifact_digest_parsers_keep_upload_and_server_grammars_separate() -> None:
     digest = "a" * 64
-    assert canonical_sha256(digest) == digest
-    assert canonical_sha256(f"sha256:{digest}") == digest
+    assert upload_artifact_sha256(digest) == digest
+    assert server_artifact_sha256(f"sha256:{digest}") == digest
 
 
-def test_publisher_shell_normalizers_accept_the_exact_server_digest_format() -> None:
+def test_publisher_shell_parsers_accept_only_the_upload_action_bare_digest() -> None:
     digest = "a" * 64
-    server_digest = f"sha256:{digest}"
     workflow = _load(RELEASE_WORKFLOW)
     steps = (
         ("publish", "Verify immutable identity immediately before PyPI"),
@@ -96,7 +92,7 @@ def test_publisher_shell_normalizers_accept_the_exact_server_digest_format() -> 
             for step in workflow["jobs"][job_name]["steps"]
             if step.get("name") == step_name
         )
-        completed = _run_digest_normalizer(run, server_digest, digest)
+        completed = _run_digest_parser(run, "upload_artifact_sha256", digest, digest)
         assert completed.returncode == 0, completed.stderr.decode(errors="replace")
 
 
@@ -109,7 +105,7 @@ def test_publisher_shell_normalizers_accept_the_exact_server_digest_format() -> 
         "sha256:" + "a" * 64 + ":decoy",
     ],
 )
-def test_publisher_shell_normalizers_reject_noncanonical_server_digests(value: str) -> None:
+def test_publisher_shell_parsers_reject_noncanonical_upload_digests(value: str) -> None:
     workflow = _load(RELEASE_WORKFLOW)
     run = next(
         step["run"]
@@ -117,7 +113,7 @@ def test_publisher_shell_normalizers_reject_noncanonical_server_digests(value: s
         if step.get("name") == "Verify immutable identity immediately before PyPI"
     )
 
-    assert _run_digest_normalizer(run, value, "a" * 64).returncode != 0
+    assert _run_digest_parser(run, "upload_artifact_sha256", value, "a" * 64).returncode != 0
 
 
 @pytest.mark.parametrize(
@@ -126,6 +122,7 @@ def test_publisher_shell_normalizers_reject_noncanonical_server_digests(value: s
         "",
         "a" * 63,
         "a" * 65,
+        "sha256:" + "a" * 64,
         "sha512:" + "a" * 64,
         "sha256:" + "A" * 64,
         "sha256:" + "a" * 64 + " ",
@@ -135,7 +132,7 @@ def test_publisher_shell_normalizers_reject_noncanonical_server_digests(value: s
 )
 def test_publishers_reject_noncanonical_sha256_artifact_identities(value: str) -> None:
     with pytest.raises(ValueError):
-        canonical_sha256(value)
+        upload_artifact_sha256(value)
 
 
 def test_recovery_dispatch_is_frozen_to_the_v013_incident_and_rebuilds_the_tag() -> None:
@@ -539,6 +536,7 @@ def test_lock_generation_is_credential_free_and_write_token_is_push_only() -> No
     assert "env" not in regenerate
     assert "PERSONAL_ACCESS_TOKEN" not in regenerate["run"]
     assert push["env"] == {
+        "EXPECTED_HEAD_SHA": "${{ needs.generate-release-lock.outputs.source_sha }}",
         "HEAD_REF": "${{ github.event.pull_request.head.ref }}",
         "WRITE_TOKEN": "${{ secrets.PERSONAL_ACCESS_TOKEN }}",
     }

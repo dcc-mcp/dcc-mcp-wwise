@@ -13,7 +13,8 @@ from typing import Any, Mapping
 
 from packaging.utils import canonicalize_name
 
-SHA256 = re.compile(r"(?:sha256:)?([0-9a-f]{64})\Z")
+BARE_SHA256 = re.compile(r"([0-9a-f]{64})\Z")
+SERVER_ARTIFACT_SHA256 = re.compile(r"sha256:([0-9a-f]{64})\Z")
 
 
 @dataclass(frozen=True)
@@ -55,13 +56,32 @@ class ReleaseIdentity:
     immutable: bool
 
 
-def canonical_sha256(value: object) -> str:
+def _bare_sha256(value: object, label: str) -> str:
     if not isinstance(value, str):
-        raise ValueError("SHA-256 identity must be a string")
-    match = SHA256.fullmatch(value)
+        raise ValueError(f"{label} must be a string")
+    match = BARE_SHA256.fullmatch(value)
     if match is None:
-        raise ValueError("SHA-256 identity is not canonical")
+        raise ValueError(f"{label} must be exactly 64 lowercase hexadecimal characters")
     return match.group(1)
+
+
+def upload_artifact_sha256(value: object) -> str:
+    """Parse only the upload-artifact action's bare digest output."""
+    return _bare_sha256(value, "upload artifact SHA-256")
+
+
+def server_artifact_sha256(value: object) -> str:
+    """Parse only the GitHub artifact REST API's prefixed digest."""
+    if not isinstance(value, str):
+        raise ValueError("server artifact SHA-256 must be a string")
+    match = SERVER_ARTIFACT_SHA256.fullmatch(value)
+    if match is None:
+        raise ValueError("server artifact SHA-256 must use canonical sha256:<64hex> format")
+    return match.group(1)
+
+
+def _pypi_sha256(value: object) -> str:
+    return _bare_sha256(value, "PyPI SHA-256")
 
 
 def _object(value: object, label: str) -> Mapping[str, Any]:
@@ -81,7 +101,7 @@ def verify_artifact(path: Path, expected: ArtifactIdentity, *, require_live: boo
         artifact_id=payload.get("id"),
         node_id=payload.get("node_id"),
         name=payload.get("name"),
-        sha256=canonical_sha256(payload.get("digest")),
+        sha256=server_artifact_sha256(payload.get("digest")),
         run_id=run.get("id"),
         repository_id=run.get("repository_id"),
         head_repository_id=run.get("head_repository_id"),
@@ -216,7 +236,7 @@ def verify_pypi_release(path: Path, distributions: Path, *, project: str, versio
             raise ValueError("PyPI distribution size does not match local bytes")
         digests = _object(record.get("digests"), "PyPI digests")
         local_sha256 = hashlib.sha256(local_path.read_bytes()).hexdigest()
-        if canonical_sha256(digests.get("sha256")) != local_sha256:
+        if _pypi_sha256(digests.get("sha256")) != local_sha256:
             raise ValueError("PyPI SHA-256 does not match local bytes")
         uploaded = record.get("upload_time_iso_8601")
         if not isinstance(uploaded, str):
@@ -303,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
                 artifact_id=arguments.id,
                 node_id=None,
                 name=arguments.name,
-                sha256=canonical_sha256(arguments.sha256),
+                sha256=upload_artifact_sha256(arguments.sha256),
                 run_id=arguments.run_id,
                 repository_id=arguments.repository_id,
                 head_repository_id=arguments.repository_id,

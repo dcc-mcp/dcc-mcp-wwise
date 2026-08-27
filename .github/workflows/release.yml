@@ -285,10 +285,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          canonical_artifact_sha256() {
+          upload_artifact_sha256() {
             if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then
               printf '%s\n' "${BASH_REMATCH[1]}"
             else
               return 1
@@ -296,7 +294,7 @@ jobs:
           }
           test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
           test -n "$ARTIFACT_ID"
-          ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")
+          ARTIFACT_SHA256=$(upload_artifact_sha256 "$ARTIFACT_DIGEST")
           [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           test "$(sha256sum release-bundle/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           (cd release-bundle && sha256sum --check SHA256SUMS)
@@ -387,10 +385,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          canonical_artifact_sha256() {
+          upload_artifact_sha256() {
             if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then
               printf '%s\n' "${BASH_REMATCH[1]}"
             else
               return 1
@@ -398,7 +394,7 @@ jobs:
           }
           test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"
           test -n "$ARTIFACT_ID"
-          ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")
+          ARTIFACT_SHA256=$(upload_artifact_sha256 "$ARTIFACT_DIGEST")
           [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           test "$(sha256sum release-assets/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           (cd release-assets && sha256sum --check SHA256SUMS)
