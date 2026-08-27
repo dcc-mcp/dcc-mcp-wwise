@@ -323,7 +323,24 @@ def _require_closed_shell(value: str, label: str, expected_lines: Sequence[str])
         raise ValueError(f"{label} must keep the reviewed closed mutation surface")
 
 
+def _normalized_path_lines(value: Any, label: str) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a newline-delimited string")
+    return tuple(line.strip() for line in value.splitlines() if line.strip())
+
+
 def validate_release(document: Mapping[str, Any]) -> None:
+    workflow_surface = {key: value for key, value in document.items() if key != "jobs"}
+    if workflow_surface != {
+        "name": "Release",
+        "on": {"push": {"branches": ["main"]}, "workflow_dispatch": None},
+        "concurrency": {
+            "group": "${{ github.workflow }}-${{ github.ref }}",
+            "cancel-in-progress": False,
+        },
+        "permissions": {},
+    }:
+        raise ValueError("release must keep its exact reviewed workflow mapping")
     if document.get("permissions") != {}:
         raise ValueError("release top-level permissions must be empty")
     jobs = _jobs(document)
@@ -388,26 +405,87 @@ def validate_release(document: Mapping[str, Any]) -> None:
         raise ValueError("source verification must freeze exact Release ID and state")
 
     build_outputs = _mapping(build.get("outputs"), "build.outputs")
-    if build_outputs != {
+    expected_build_outputs = {
         "source_sha": "${{ steps.source.outputs.source_sha }}",
         "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
         "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
         "manifest_digest": "${{ steps.hashes.outputs.manifest_digest }}",
-    }:
+    }
+    if build_outputs != expected_build_outputs:
         raise ValueError("build must expose source, artifact ID, and trusted hash manifest")
+
+    expected_job_surfaces: Mapping[str, Mapping[str, Any]] = {
+        "release-please": {
+            "if": "github.ref == 'refs/heads/main'",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "permissions": {"contents": "write", "pull-requests": "write"},
+            "outputs": {
+                "release_created": "${{ steps.release.outputs.release_created }}",
+                "tag_name": "${{ steps.release.outputs.tag_name }}",
+            },
+        },
+        "verify-release-source": {
+            "needs": "release-please",
+            "if": "needs.release-please.outputs.release_created == 'true'",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "permissions": {"contents": "read"},
+            "outputs": expected_verify_outputs,
+        },
+        "build": {
+            "name": "Build wheel and sdist once",
+            "needs": ["release-please", "verify-release-source"],
+            "if": "needs.release-please.outputs.release_created == 'true'",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 15,
+            "permissions": {"contents": "read"},
+            "outputs": expected_build_outputs,
+        },
+        "publish": {
+            "needs": ["release-please", "verify-release-source", "build"],
+            "if": "needs.release-please.outputs.release_created == 'true'",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "environment": {
+                "name": "pypi",
+                "url": "https://pypi.org/p/dcc-mcp-wwise",
+            },
+            "permissions": {"actions": "read", "contents": "read", "id-token": "write"},
+        },
+        "attach-release-assets": {
+            "needs": ["release-please", "verify-release-source", "build", "publish"],
+            "if": (
+                "needs.release-please.outputs.release_created == 'true' && "
+                "needs.publish.result == 'success'"
+            ),
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "permissions": {"actions": "read", "contents": "write"},
+        },
+    }
+    for job_name, expected_surface in expected_job_surfaces.items():
+        job = _job(document, job_name)
+        surface = {key: value for key, value in job.items() if key != "steps"}
+        if surface != expected_surface:
+            raise ValueError(f"{job_name} must keep its exact reviewed job mapping")
     build_steps = _steps(build, "jobs.build")
     upload = _step_by_name(build_steps, "Upload immutable Python distributions")
     if upload.get("uses") != UPLOAD_ARTIFACT or upload.get("id") != "upload":
         raise ValueError("build must upload exactly one immutable distribution artifact")
     upload_with = _mapping(upload.get("with"), "build upload inputs")
-    upload_path = upload_with.get("path")
-    if (
-        not isinstance(upload_path, str)
-        or "dist/*.whl" not in upload_path
-        or "dist/*.tar.gz" not in upload_path
-        or "dist/SHA256SUMS" not in upload_path
+    upload_inputs_without_path = {key: value for key, value in upload_with.items() if key != "path"}
+    if upload_inputs_without_path != {
+        "name": ("python-dist-${{ needs.release-please.outputs.tag_name }}-${{ github.run_id }}"),
+        "if-no-files-found": "error",
+        "compression-level": 0,
+        "retention-days": 1,
+    } or _normalized_path_lines(upload_with.get("path"), "build upload path") != (
+        "dist/*.whl",
+        "dist/*.tar.gz",
+        "dist/SHA256SUMS",
     ):
-        raise ValueError("build artifact must contain distributions and their hash manifest")
+        raise ValueError("build artifact must keep its exact reviewed inputs and path list")
 
     verify_steps = _steps(verify, "jobs.verify-release-source")
     if _step_markers(verify_steps) != [
@@ -482,6 +560,14 @@ def validate_release(document: Mapping[str, Any]) -> None:
     }
     for name, expected_lines in expected_build_runs.items():
         _require_closed_shell(_run(_step_by_name(build_steps, name), name), name, expected_lines)
+    receipt = _step_by_name(build_steps, "Record immutable build receipt")
+    if receipt.get("env") != {
+        "SOURCE_SHA": "${{ steps.source.outputs.source_sha }}",
+        "ARTIFACT_ID": "${{ steps.upload.outputs.artifact-id }}",
+        "ARTIFACT_DIGEST": "${{ steps.upload.outputs.artifact-digest }}",
+        "MANIFEST_DIGEST": "${{ steps.hashes.outputs.manifest_digest }}",
+    }:
+        raise ValueError("build receipt must keep its exact reviewed step mapping")
 
     publish_steps = _steps(publish, "jobs.publish")
     attach_steps = _steps(attach, "jobs.attach-release-assets")
@@ -517,6 +603,39 @@ def validate_release(document: Mapping[str, Any]) -> None:
         "Verify identity and attach assets without clobbering",
     ]:
         raise ValueError("GitHub asset job must keep the reviewed closed mutation surface")
+
+    expected_step_keys = {
+        "release-please": [{"id", "uses", "with"}],
+        "verify-release-source": [
+            {"uses", "with"},
+            {"name", "id", "env", "shell", "run"},
+        ],
+        "build": [
+            {"uses", "with"},
+            {"uses", "with"},
+            {"name", "id", "env", "shell", "run"},
+            {"name", "run"},
+            {"name", "run"},
+            {"name", "run"},
+            {"name", "shell", "run"},
+            {"name", "id", "shell", "run"},
+            {"name", "id", "uses", "with"},
+            {"name", "env", "run"},
+        ],
+        "publish": [
+            {"name", "uses", "with"},
+            {"name", "env", "shell", "run"},
+            {"name", "uses", "with"},
+        ],
+        "attach-release-assets": [
+            {"name", "uses", "with"},
+            {"name", "env", "shell", "run"},
+        ],
+    }
+    for job_name, expected_keys in expected_step_keys.items():
+        actual_steps = _steps(_job(document, job_name), f"jobs.{job_name}")
+        if [set(step) for step in actual_steps] != expected_keys:
+            raise ValueError(f"{job_name} must keep every exact reviewed step mapping")
 
     for consumer, label in ((publish_steps[0], "PyPI"), (attach_steps[0], "GitHub assets")):
         if consumer.get("uses") != DOWNLOAD_ARTIFACT:
