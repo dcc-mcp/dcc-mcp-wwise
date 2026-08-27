@@ -410,6 +410,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
+      - name: Install pinned recovery identity dependency
+        run: python -m pip install "packaging==26.2"
       - name: Bind the recovery to the frozen v0.1.4 incident
         id: source
         env:

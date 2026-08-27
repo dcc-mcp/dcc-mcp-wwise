@@ -21,10 +21,31 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
-RECOVERY_WORKFLOW_SHA256 = "b0e208ac3a9bbde020839e978d9200f6769f0daec7d8439ce9d7b13d6e6bf2ff"
-RELEASE_SEMANTIC_SHA256 = "0b3b3a7aff6b0358568e650864410736a0ada5a929b42ebb1ebc5987a00d4f31"
+RECOVERY_WORKFLOW_SHA256 = "3a03cde86f9a5a0c7c45cac1256c57e722f4f8046e22d31f14d405cc73d4b796"
+RELEASE_SEMANTIC_SHA256 = "05f28ad065e772af1b10036bbdd4e2509f7bc6144b3b6d3ad7d159f841d508ad"
 RELEASE_INTEGRITY_SHA256 = "c8b15f136aa59ed7473a67cd4af389c2c105ffe3c38894a4c397e41950a0a59e"
 ARCHIVE_VALIDATOR_SHA256 = "31b77b7fad89a8813e25d78bbcfa303853509d852db03320335707c002da9433"
+RECOVERY_SOURCE_RUN = "\n".join(
+    (
+        "set -euo pipefail",
+        'test "$TAG_NAME" = "v0.1.4"',
+        'test "$SOURCE_SHA" = "e31a6b9430f1b9f9494401c66d52e87ecb31fca4"',
+        'test "$RELEASE_ID" = "378005400"',
+        'test "$RELEASE_NODE_ID" = "RE_kwDOTnYlVs4Wh-eY"',
+        'test "$ORIGINAL_RUN_ID" = "33098798286"',
+        'test "$(git -C tag-source rev-parse HEAD)" = "$SOURCE_SHA"',
+        (
+            'test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" '
+            '--jq \'.object.sha\')" = "$SOURCE_SHA"'
+        ),
+        'gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID" > incident.json',
+        "python scripts/ci/release_integrity.py release release.json",
+        "python scripts/ci/release_integrity.py incident incident.json",
+        'echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"',
+        "",
+    )
+)
 SURFACE_ERROR = (
     "closed recovery mutation surface; clobber; exactly one GitHub Release upload mutation; "
     "exactly one PyPI publication mutation; release-please inputs; checkout inputs; "
@@ -391,7 +412,61 @@ def validate_release(document: Mapping[str, Any]) -> None:
     _validate_release_semantics(document)
 
 
+def validate_recovery_bootstrap(document: Mapping[str, Any]) -> None:
+    steps = _steps(_job(document, "recovery-build"), "recovery-build")
+    setup = {
+        "uses": SETUP_PYTHON,
+        "with": {"python-version": "3.13"},
+    }
+    install = {
+        "name": "Install pinned recovery identity dependency",
+        "run": 'python -m pip install "packaging==26.2"',
+    }
+    source = {
+        "name": "Bind the recovery to the frozen v0.1.4 incident",
+        "id": "source",
+        "env": {
+            "GH_HOST": "github.com",
+            "GH_TOKEN": "${{ github.token }}",
+            "TAG_NAME": "${{ inputs.tag }}",
+            "SOURCE_SHA": "${{ inputs.source_sha }}",
+            "RELEASE_ID": "${{ inputs.release_id }}",
+            "RELEASE_NODE_ID": "${{ inputs.release_node_id }}",
+            "ORIGINAL_RUN_ID": "${{ inputs.original_run_id }}",
+        },
+        "shell": "bash",
+        "run": RECOVERY_SOURCE_RUN,
+    }
+    setup_indices = [index for index, step in enumerate(steps) if step == setup]
+    install_indices = [index for index, step in enumerate(steps) if step == install]
+    source_indices = [index for index, step in enumerate(steps) if step == source]
+    source_id_indices = [index for index, step in enumerate(steps) if step.get("id") == "source"]
+    helper_step_indices = [
+        index
+        for index, step in enumerate(steps)
+        if any(
+            "scripts/ci/release_integrity.py" in line
+            for line in _executable_lines(str(step.get("run", "")))
+        )
+    ]
+    if (
+        len(setup_indices) != 1
+        or len(install_indices) != 1
+        or len(source_indices) != 1
+        or source_id_indices != source_indices
+        or install_indices[0] != setup_indices[0] + 1
+        or source_indices[0] != install_indices[0] + 1
+        or not helper_step_indices
+        or helper_step_indices[0] != source_indices[0]
+    ):
+        raise ValueError(
+            "closed recovery mutation surface: recovery-build must install the exact "
+            "pinned recovery helper dependency immediately before its first Python helper"
+        )
+
+
 def validate_recovery(document: Mapping[str, Any]) -> None:
+    validate_recovery_bootstrap(document)
     _validate_release_semantics(document)
 
 
