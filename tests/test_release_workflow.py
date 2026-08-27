@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import subprocess
 import sys
+import venv
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,165 @@ def _recovery_document():
 
 def _named_step(document, job: str, name: str):
     return next(step for step in document["jobs"][job]["steps"] if step.get("name") == name)
+
+
+def _isolated_python(environment: Path) -> Path:
+    scripts = "Scripts" if sys.platform == "win32" else "bin"
+    executable = "python.exe" if sys.platform == "win32" else "python"
+    return environment / scripts / executable
+
+
+def test_recovery_installs_pinned_helper_dependency_before_first_helper(
+    tmp_path: Path,
+) -> None:
+    document = _recovery_document()
+    steps = document["jobs"]["recovery-build"]["steps"]
+    environment = tmp_path / "clean-python"
+    venv.EnvBuilder(with_pip=True).create(environment)
+    python = _isolated_python(environment)
+    absent = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "import importlib.util; print(importlib.util.find_spec('packaging'))",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert absent.returncode == 0
+    assert absent.stdout.strip() == "None"
+
+    for step in steps:
+        executable = tuple(
+            line.strip()
+            for line in str(step.get("run", "")).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        if executable == ('python -m pip install "packaging==26.2"',):
+            installed = subprocess.run(
+                [str(python), "-m", "pip", "install", "packaging==26.2"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert installed.returncode == 0, installed.stdout + installed.stderr
+        if any(line.startswith("python scripts/ci/release_integrity.py ") for line in executable):
+            helper = subprocess.run(
+                [str(python), "scripts/ci/release_integrity.py", "--help"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert helper.returncode == 0, helper.stdout + helper.stderr
+            return
+
+    pytest.fail("recovery-build never executes the release integrity helper")
+
+
+@pytest.mark.parametrize("mutation", ["later", "comment-decoy", "duplicate"])
+def test_recovery_bootstrap_contract_rejects_unreviewed_order_and_decoys(
+    mutation: str,
+) -> None:
+    from scripts.ci.check_workflows import validate_recovery_bootstrap
+
+    document = _recovery_document()
+    validate_recovery_bootstrap(document)
+    mutated = copy.deepcopy(document)
+    steps = mutated["jobs"]["recovery-build"]["steps"]
+    install_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Install pinned recovery identity dependency"
+    )
+    install = steps.pop(install_index)
+    source_index = next(index for index, step in enumerate(steps) if step.get("id") == "source")
+    if mutation == "later":
+        steps.insert(source_index + 1, install)
+    elif mutation == "comment-decoy":
+        install["run"] = '# python -m pip install "packaging==26.2"\ntrue'
+        steps.insert(source_index, install)
+    else:
+        steps.insert(source_index, install)
+        steps.insert(source_index + 1, copy.deepcopy(install))
+
+    with pytest.raises(ValueError, match="pinned recovery helper dependency"):
+        validate_recovery_bootstrap(mutated)
+
+
+def test_recovery_source_helper_failure_cannot_continue() -> None:
+    from scripts.ci.check_workflows import validate_recovery_bootstrap
+
+    document = _recovery_document()
+    source = next(
+        step for step in document["jobs"]["recovery-build"]["steps"] if step.get("id") == "source"
+    )
+    source["continue-on-error"] = True
+
+    with pytest.raises(ValueError, match="pinned recovery helper dependency"):
+        validate_recovery_bootstrap(document)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "name",
+        "id",
+        "env",
+        "shell",
+        "run",
+        "if",
+        "working-directory",
+        "timeout-minutes",
+        "alternate-helper",
+        "adjacent-helper-decoy",
+    ],
+)
+def test_recovery_source_step_rejects_every_unreviewed_execution_boundary(
+    mutation: str,
+) -> None:
+    from scripts.ci.check_workflows import validate_recovery_bootstrap
+
+    document = _recovery_document()
+    steps = document["jobs"]["recovery-build"]["steps"]
+    source_index = next(index for index, step in enumerate(steps) if step.get("id") == "source")
+    source = steps[source_index]
+    if mutation == "name":
+        source["name"] = "Decoy source binding"
+    elif mutation == "id":
+        source["id"] = "decoy-source"
+    elif mutation == "env":
+        source["env"]["GH_TOKEN"] = "${{ secrets.UNREVIEWED_TOKEN }}"
+    elif mutation == "shell":
+        source["shell"] = "bash -x {0}"
+    elif mutation == "run":
+        source["run"] += "true\n"
+    elif mutation == "if":
+        source["if"] = "${{ false }}"
+    elif mutation == "working-directory":
+        source["working-directory"] = "tag-source"
+    elif mutation == "timeout-minutes":
+        source["timeout-minutes"] = 1
+    elif mutation == "alternate-helper":
+        source["run"] = source["run"].replace(
+            "release release.json",
+            "release missing.json || true",
+            1,
+        )
+    else:
+        steps.insert(
+            source_index,
+            {
+                "name": "Unused helper-shaped decoy",
+                "continue-on-error": True,
+                "run": "python scripts/ci/release_integrity.py release missing.json || true",
+            },
+        )
+
+    with pytest.raises(ValueError, match="pinned recovery helper dependency"):
+        validate_recovery_bootstrap(document)
 
 
 def test_release_lock_download_uses_fresh_isolated_staging_before_exact_install() -> None:
