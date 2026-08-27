@@ -72,7 +72,7 @@ def test_release_archive_verifier_installs_source_wheel_and_sdist(
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(release_archives.subprocess, "run", record)
-    verify_pair(wheel, sdist, ROOT / "src" / "dcc_mcp_wwise", "dcc-mcp-wwise", "0.1.3")
+    verify_pair(wheel, sdist, ROOT / "src" / "dcc_mcp_wwise", "dcc-mcp-wwise", "auto")
 
     environments = [command for command in commands if command[1:3] == ["-m", "venv"]]
     assert len(environments) == 3
@@ -131,4 +131,4 @@ def test_release_archives_reject_missing_extra_or_changed_sdist_runtime_content(
     _mutate_sdist(sdist, changed, remove=remove, add=add, replace=replace)
 
     with pytest.raises(ValueError):
-        verify_pair(wheel, changed, ROOT / "src" / "dcc_mcp_wwise", "dcc-mcp-wwise", "0.1.3")
+        verify_pair(wheel, changed, ROOT / "src" / "dcc_mcp_wwise", "dcc-mcp-wwise", "auto")

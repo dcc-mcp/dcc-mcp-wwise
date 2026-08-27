@@ -105,6 +105,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.generate-release-lock.outputs.artifact_id }}
           path: .
+          merge-multiple: true
       - name: Recapture and commit the exact lock only
         env:
           EXPECTED_HEAD_SHA: ${{ needs.generate-release-lock.outputs.source_sha }}
