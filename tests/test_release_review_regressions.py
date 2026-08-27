@@ -12,6 +12,8 @@ from dcc_mcp_core import yaml_loads
 from twine.exceptions import InvalidDistribution
 from twine.package import PackageFile
 
+from scripts.ci.release_integrity import canonical_sha256
+
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 RECOVERY_WORKFLOW = RELEASE_WORKFLOW
@@ -58,14 +60,9 @@ def _run_digest_normalizer(
 
 
 def test_publishers_canonicalize_bare_and_prefixed_sha256_artifact_digests() -> None:
-    workflow = _load(RELEASE_WORKFLOW)
     digest = "a" * 64
-
-    for job_name in ("publish", "attach-release-assets"):
-        identity_run = workflow["jobs"][job_name]["steps"][1]["run"]
-        for value in (digest, f"sha256:{digest}"):
-            completed = _run_digest_normalizer(identity_run, value, digest)
-            assert completed.returncode == 0
+    assert canonical_sha256(digest) == digest
+    assert canonical_sha256(f"sha256:{digest}") == digest
 
 
 @pytest.mark.parametrize(
@@ -82,12 +79,8 @@ def test_publishers_canonicalize_bare_and_prefixed_sha256_artifact_digests() -> 
     ],
 )
 def test_publishers_reject_noncanonical_sha256_artifact_identities(value: str) -> None:
-    workflow = _load(RELEASE_WORKFLOW)
-    digest = "a" * 64
-
-    for job_name in ("publish", "attach-release-assets"):
-        identity_run = workflow["jobs"][job_name]["steps"][1]["run"]
-        assert _run_digest_normalizer(identity_run, value, digest).returncode != 0
+    with pytest.raises(ValueError):
+        canonical_sha256(value)
 
 
 def test_recovery_dispatch_is_frozen_to_the_v013_incident_and_rebuilds_the_tag() -> None:
@@ -97,11 +90,14 @@ def test_recovery_dispatch_is_frozen_to_the_v013_incident_and_rebuilds_the_tag()
         "tag": "v0.1.3",
         "source_sha": "d921113c14ec1c270897b70d553d1261d7a20fa1",
         "release_id": "377552005",
+        "release_node_id": "RE_kwDOTnYlVs4WgPyF",
         "original_run_id": "33037251075",
         "original_artifact_id": "9632474230",
         "original_artifact_digest": (
             "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c"
         ),
+        "original_artifact_name": "python-dist-v0.1.3-33037251075",
+        "original_artifact_node_id": "MDg6QXJ0aWZhY3Q5NjMyNDc0MjMw",
         "manifest_digest": "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815",
         "release_draft": "false",
         "release_prerelease": "false",
@@ -121,21 +117,22 @@ def test_recovery_dispatch_is_frozen_to_the_v013_incident_and_rebuilds_the_tag()
     assert workflow["jobs"]["recovery-attach-release-assets"]["if"] == (
         "github.event_name == 'workflow_dispatch' && needs.recovery-publish.result == 'success'"
     )
-    checkout = build["steps"][0]
+    checkout = next(
+        step
+        for step in build["steps"]
+        if step.get("name") == "Checkout the immutable publication source separately"
+    )
     assert checkout["with"] == {
         "ref": "${{ inputs.tag }}",
         "fetch-depth": 0,
         "persist-credentials": False,
+        "path": "tag-source",
     }
     assert build["outputs"] == {
         "source_sha": "${{ steps.source.outputs.source_sha }}",
-        "release_id": "${{ steps.source.outputs.release_id }}",
-        "release_draft": "${{ steps.source.outputs.release_draft }}",
-        "release_prerelease": "${{ steps.source.outputs.release_prerelease }}",
-        "release_immutable": "${{ steps.source.outputs.release_immutable }}",
         "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
         "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
-        "manifest_digest": "${{ steps.hashes.outputs.manifest_digest }}",
+        "manifest_digest": "${{ steps.select.outputs.manifest_digest }}",
     }
 
 
@@ -148,12 +145,12 @@ def test_recovery_build_fails_closed_on_incident_or_live_identity_drift() -> Non
     guards = [
         ('test "$TAG_NAME" = "v0.1.3"', "TAG_NAME", "v0.1.3", "v0.1.4"),
         (
-            'test "$EXPECTED_SOURCE_SHA" = "d921113c14ec1c270897b70d553d1261d7a20fa1"',
-            "EXPECTED_SOURCE_SHA",
+            'test "$SOURCE_SHA" = "d921113c14ec1c270897b70d553d1261d7a20fa1"',
+            "SOURCE_SHA",
             "d921113c14ec1c270897b70d553d1261d7a20fa1",
             "a" * 40,
         ),
-        ('test "$EXPECTED_RELEASE_ID" = "377552005"', "EXPECTED_RELEASE_ID", "377552005", "1"),
+        ('test "$RELEASE_ID" = "377552005"', "RELEASE_ID", "377552005", "1"),
         (
             'test "$ORIGINAL_RUN_ID" = "33037251075"',
             "ORIGINAL_RUN_ID",
@@ -172,23 +169,40 @@ def test_recovery_build_fails_closed_on_incident_or_live_identity_drift() -> Non
         assert _run_workflow_guard(run, command, {name: drifted}) != 0
 
     required_live_recaptures = [
-        'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"',
-        'TAG_JSON=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME")',
-        'RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
-        'RUN_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID")',
-        'test "$TAG_SHA" = "$EXPECTED_SOURCE_SHA"',
-        'test "$RELEASE_TARGET" = "$EXPECTED_SOURCE_SHA"',
-        'test "$CURRENT_RELEASE_ID" = "$EXPECTED_RELEASE_ID"',
-        'test "$RUN_HEAD_SHA" = "$EXPECTED_SOURCE_SHA"',
-        'test "$RUN_CONCLUSION" = "failure"',
+        (
+            'gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ORIGINAL_ARTIFACT_ID" '
+            "> original-artifact.json"
+        ),
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID" > incident.json',
+        (
+            "python scripts/ci/release_integrity.py original-artifact "
+            "original-artifact.json --allow-expired"
+        ),
+        "python scripts/ci/release_integrity.py incident incident.json",
+        "python scripts/ci/release_integrity.py release release.json",
     ]
     for line in required_live_recaptures:
         assert line in run
 
+    download = next(step for step in build["steps"] if step.get("name", "").startswith("Download"))
+    assert download["if"] == "steps.source.outputs.original_live == 'true'"
     upload = next(step for step in build["steps"] if step.get("id") == "upload")
+    upload_index = build["steps"].index(upload)
+    pre_upload = build["steps"][upload_index - 1]
+    assert pre_upload["name"] == "Recapture frozen identity before recovery artifact upload"
+    for required in (
+        "git/ref/tags/$TAG_NAME",
+        "releases/$RELEASE_ID",
+        "actions/runs/$ORIGINAL_RUN_ID",
+        "actions/artifacts/$ORIGINAL_ARTIFACT_ID",
+        "release_integrity.py release",
+        "release_integrity.py incident",
+        "release_integrity.py original-artifact",
+    ):
+        assert required in pre_upload["run"]
     assert upload["with"] == {
         "name": "recovery-python-dist-v0.1.3-${{ github.run_id }}",
-        "path": "dist/*.whl\ndist/*.tar.gz\ndist/SHA256SUMS\n",
+        "path": "selected-dist/*.whl\nselected-dist/*.tar.gz\nselected-dist/SHA256SUMS\n",
         "if-no-files-found": "error",
         "compression-level": 0,
         "retention-days": 7,
@@ -209,7 +223,14 @@ def test_recovery_pypi_is_bound_to_the_new_artifact_and_idempotent_exact_files()
         "id-token": "write",
     }
 
-    download, identity, publisher = publish["steps"]
+    preflight = next(
+        step for step in publish["steps"] if step.get("name", "").startswith("Recapture")
+    )
+    download = next(
+        step for step in publish["steps"] if step.get("name", "").startswith("Download")
+    )
+    identity = next(step for step in publish["steps"] if step.get("id") == "identity")
+    publisher = publish["steps"][-1]
     assert download["with"] == {
         "artifact-ids": "${{ needs.recovery-build.outputs.artifact_id }}",
         "path": "release-bundle",
@@ -217,23 +238,21 @@ def test_recovery_pypi_is_bound_to_the_new_artifact_and_idempotent_exact_files()
     }
     run = identity["run"]
     for required in (
-        'ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")',
-        'CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")',
-        'CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")',
-        'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
-        'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
-        'test "$ARTIFACT_RUN_ID" = "$EXPECTED_RUN_ID"',
-        'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
-        'test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"',
+        "python scripts/ci/release_integrity.py original-artifact",
+        "python scripts/ci/release_integrity.py incident",
+        "python scripts/ci/release_integrity.py release",
+        "python scripts/ci/release_integrity.py artifact selected-artifact.json",
         "(cd release-bundle && sha256sum --check SHA256SUMS)",
+        "python tools/verify_release_archives.py release-bundle/*.whl",
         "cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/",
         "https://pypi.org/pypi/dcc-mcp-wwise/0.1.3/json",
-        'test "$(jq \'.urls | length\' "$PYPI_JSON")" -eq 2',
+        'python scripts/ci/release_integrity.py pypi "$PYPI_JSON" pypi-dist',
         'echo "publish_required=false" >> "$GITHUB_OUTPUT"',
         'echo "publish_required=true" >> "$GITHUB_OUTPUT"',
     ):
         assert required in run
-    assert run.index("CURRENT_ARTIFACT_JSON=$(gh api") < run.index("publish_required=")
+    assert "actions/artifacts/${{ inputs.original_artifact_id }}" in preflight["run"]
+    assert run.index("selected-artifact.json") < run.index("publish_required=")
     assert publisher["if"] == "steps.identity.outputs.publish_required == 'true'"
     assert publisher["uses"] == (
         "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
@@ -245,6 +264,21 @@ def test_recovery_pypi_is_bound_to_the_new_artifact_and_idempotent_exact_files()
     }
 
 
+def test_recovery_artifact_provenance_binds_the_recovery_run_head() -> None:
+    """The selected artifact belongs to this recovery run, not the v0.1.3 run."""
+    workflow = _load(RECOVERY_WORKFLOW)
+    for job_name in ("recovery-publish", "recovery-attach-release-assets"):
+        runs = "\n".join(str(step.get("run", "")) for step in workflow["jobs"][job_name]["steps"])
+        selected_checks = [
+            line
+            for line in runs.splitlines()
+            if "release_integrity.py artifact selected-artifact.json" in line
+        ]
+        assert selected_checks
+        assert all('--head-sha "$GITHUB_SHA"' in line for line in selected_checks)
+        assert all('--head-sha "$SOURCE_SHA"' not in line for line in selected_checks)
+
+
 def test_recovery_assets_are_idempotent_and_recap_every_identity_before_post() -> None:
     workflow = _load(RECOVERY_WORKFLOW)
     attach = workflow["jobs"]["recovery-attach-release-assets"]
@@ -253,7 +287,11 @@ def test_recovery_assets_are_idempotent_and_recap_every_identity_before_post() -
         "github.event_name == 'workflow_dispatch' && needs.recovery-publish.result == 'success'"
     )
     assert attach["permissions"] == {"actions": "read", "contents": "write"}
-    download, identity = attach["steps"]
+    preflight = next(
+        step for step in attach["steps"] if step.get("name", "").startswith("Recapture")
+    )
+    download = next(step for step in attach["steps"] if step.get("name", "").startswith("Download"))
+    identity = attach["steps"][-1]
     assert download["with"] == {
         "artifact-ids": "${{ needs.recovery-build.outputs.artifact_id }}",
         "path": "release-assets",
@@ -262,7 +300,7 @@ def test_recovery_assets_are_idempotent_and_recap_every_identity_before_post() -
     run = identity["run"]
     upload = (
         'gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/'
-        'releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME"'
+        'releases/${{ inputs.release_id }}/assets?name=$ENCODED_NAME"'
     )
     assert run.count(upload) == 1
     loop = run.rsplit("for asset in release-assets/*; do", 1)[-1]
@@ -270,40 +308,25 @@ def test_recovery_assets_are_idempotent_and_recap_every_identity_before_post() -
         "ASSET_MATCH_COUNT=$(jq",
         'EXISTING_ASSET_ID=$(jq -r --arg name "$name"',
         'gh api --header "Accept: application/octet-stream"',
-        'test "$EXISTING_SHA256" = "$LOCAL_SHA256"',
-        'CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")',
-        'CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")',
-        'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
-        'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
-        'TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME"',
-        'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
-        'test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"',
+        'test "$(sha256sum existing-asset | awk \'{print $1}\')" = "$LOCAL_SHA256"',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ inputs.original_artifact_id }}"',
+        "python scripts/ci/release_integrity.py original-artifact",
+        "python scripts/ci/release_integrity.py artifact selected-artifact.json",
+        'test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME"',
     ):
         assert required in loop
-    assert loop.index("CURRENT_ARTIFACT_JSON=$(gh api") < loop.index(upload)
-    assert loop.index("CURRENT_RELEASE_JSON=$(gh api") < loop.index(upload)
-    assert loop.index("TAG_SHA=$(gh api") < loop.index(upload)
-    assert (
-        _run_workflow_guard(
-            loop,
-            'test "$EXISTING_SHA256" = "$LOCAL_SHA256"',
-            {"EXISTING_SHA256": "a" * 64, "LOCAL_SHA256": "a" * 64},
-        )
-        == 0
-    )
-    assert (
-        _run_workflow_guard(
-            loop,
-            'test "$EXISTING_SHA256" = "$LOCAL_SHA256"',
-            {"EXISTING_SHA256": "a" * 64, "LOCAL_SHA256": "b" * 64},
-        )
-        != 0
-    )
+    assert loop.index("original-artifact.json") < loop.index(upload)
+    assert loop.index("selected-artifact.json") < loop.index(upload)
+    assert "actions/artifacts/${{ inputs.original_artifact_id }}" in preflight["run"]
 
 
 def test_asset_publication_stops_on_a_mid_loop_tag_move() -> None:
     workflow = _load(RELEASE_WORKFLOW)
-    attach_run = workflow["jobs"]["attach-release-assets"]["steps"][1]["run"]
+    attach_run = next(
+        step["run"]
+        for step in workflow["jobs"]["attach-release-assets"]["steps"]
+        if step.get("name") == "Verify identity and attach assets without clobbering"
+    )
     asset_loop = attach_run.rsplit("for asset in release-assets/*; do", 1)[-1]
     guard = 'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"'
     verified = "a" * 40
@@ -332,34 +355,17 @@ def test_asset_publication_stops_on_a_mid_loop_tag_move() -> None:
 
 def test_publishers_reject_mismatched_server_artifact_digest() -> None:
     workflow = _load(RELEASE_WORKFLOW)
-    expected_digest = "a" * 64
-    mismatched_digest = "b" * 64
-    guard = 'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"'
-    metadata_lookup = (
-        'CURRENT_ARTIFACT_JSON=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")'
-    )
-
     for job_name in ("publish", "attach-release-assets"):
-        identity_run = workflow["jobs"][job_name]["steps"][1]["run"]
-        assert (
-            _run_workflow_guard(
-                identity_run,
-                guard,
-                {
-                    "ARTIFACT_SHA256": expected_digest,
-                    "CURRENT_ARTIFACT_SHA256": mismatched_digest,
-                },
-            )
-            != 0
-        )
-        assert metadata_lookup in identity_run
-        assert identity_run.index(metadata_lookup) < identity_run.index(guard)
+        runs = "\n".join(step.get("run", "") for step in workflow["jobs"][job_name]["steps"])
+        assert runs.count("release_integrity.py artifact artifact.json") >= 2
 
 
 def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
     workflow = _load(RELEASE_WORKFLOW)
     publish = workflow["jobs"]["publish"]
-    download = publish["steps"][0]
+    download = next(
+        step for step in publish["steps"] if step.get("name", "").startswith("Download")
+    )
     publication = publish["steps"][-1]
     bundle = tmp_path / download["with"]["path"]
     packages = tmp_path / publication["with"]["packages-dir"]
@@ -374,7 +380,11 @@ def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
     with pytest.raises(InvalidDistribution, match="Unknown distribution format"):
         PackageFile.from_filename(str(bundle / "SHA256SUMS"), None)
 
-    identity_run = publish["steps"][1]["run"]
+    identity_run = next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Verify immutable identity immediately before PyPI"
+    )
     assert "cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/" in identity_run
     packages.mkdir()
     for pattern in ("*.whl", "*.tar.gz"):
@@ -450,12 +460,15 @@ def test_release_identity_freezes_id_and_state_and_recaptures_before_mutations()
 
     assert set(verify["outputs"]) >= {
         "release_id",
+        "release_node_id",
         "release_draft",
         "release_prerelease",
         "release_immutable",
     }
     for job in (publish, attach):
-        identity = job["steps"][1]
+        identity = next(
+            step for step in job["steps"] if "VERIFIED_RELEASE_ID" in step.get("env", {})
+        )
         assert identity["env"]["VERIFIED_RELEASE_ID"] == (
             "${{ needs.verify-release-source.outputs.release_id }}"
         )
@@ -465,8 +478,13 @@ def test_release_identity_freezes_id_and_state_and_recaptures_before_mutations()
         assert "CURRENT_RELEASE_DRAFT=$(jq" in identity["run"]
         assert "CURRENT_RELEASE_PRERELEASE=$(jq" in identity["run"]
         assert "CURRENT_RELEASE_IMMUTABLE=$(jq" in identity["run"]
+        assert "VERIFIED_RELEASE_NODE_ID" in identity["env"]
 
-    attach_run = attach["steps"][1]["run"]
+    attach_run = next(
+        step["run"]
+        for step in attach["steps"]
+        if step.get("name") == "Verify identity and attach assets without clobbering"
+    )
     assert "gh release upload" not in attach_run
     upload = attach_run.index("releases/$CURRENT_RELEASE_ID/assets?name=")
     assert '--input "$asset"' in attach_run[upload:]

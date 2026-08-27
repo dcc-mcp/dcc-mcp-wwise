@@ -1,0 +1,5 @@
+.gitattributes text eol=lf
+.github/workflows/*.yml text eol=lf
+scripts/ci/*.py text eol=lf
+tools/*.py text eol=lf
+tests/*.py text eol=lf

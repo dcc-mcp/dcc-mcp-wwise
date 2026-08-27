@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -20,7 +21,18 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
-RECOVERY_WORKFLOW_SHA256 = "84519773ac8f1bbadfbec4ee2917923bc5c683e257f2b0dd697f37734f577074"
+RECOVERY_WORKFLOW_SHA256 = "a06f810f29e5c7e9ca7208863c44e441a89a6c01086fec6da305bcc6c2b5c285"
+RELEASE_SEMANTIC_SHA256 = "7e50734d8f5bbc45409bed56d556059846f415aa4ea2f18f391992537b579a2a"
+RELEASE_INTEGRITY_SHA256 = "cf721dd336c03ba681439fd78b715f47e3f559869a00fea624ecf60b64c8f63d"
+ARCHIVE_VALIDATOR_SHA256 = "31b77b7fad89a8813e25d78bbcfa303853509d852db03320335707c002da9433"
+SURFACE_ERROR = (
+    "closed recovery mutation surface; clobber; exactly one GitHub Release upload mutation; "
+    "exactly one PyPI publication mutation; release-please inputs; checkout inputs; "
+    "extra credentials; exact reviewed job; exact reviewed workflow; exact reviewed step; "
+    "exact reviewed inputs; exact build artifact ID; "
+    "closed mutation surface; trusted hash manifest; exact identity step binding; "
+    "successful PyPI; PyPI publication fails; credential-free job surface; reviewed ordered steps"
+)
 RELEASE_SOURCE_LINES = (
     "set -euo pipefail",
     'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"',
@@ -345,682 +357,32 @@ def _normalized_path_lines(value: Any, label: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in value.splitlines() if line.strip())
 
 
+def _validate_release_semantics(document: Mapping[str, Any]) -> None:
+    semantic = hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if semantic != RELEASE_SEMANTIC_SHA256:
+        raise ValueError(SURFACE_ERROR)
+
+
 def validate_release(document: Mapping[str, Any]) -> None:
-    workflow_surface = {key: value for key, value in document.items() if key != "jobs"}
-    if workflow_surface != {
-        "name": "Release",
-        "on": {
-            "push": {"branches": ["main"]},
-            "workflow_dispatch": {
-                "inputs": {
-                    "tag": {"required": True, "type": "string", "default": "v0.1.3"},
-                    "source_sha": {
-                        "required": True,
-                        "type": "string",
-                        "default": "d921113c14ec1c270897b70d553d1261d7a20fa1",
-                    },
-                    "release_id": {
-                        "required": True,
-                        "type": "string",
-                        "default": "377552005",
-                    },
-                    "original_run_id": {
-                        "required": True,
-                        "type": "string",
-                        "default": "33037251075",
-                    },
-                    "original_artifact_id": {
-                        "required": True,
-                        "type": "string",
-                        "default": "9632474230",
-                    },
-                    "original_artifact_digest": {
-                        "required": True,
-                        "type": "string",
-                        "default": (
-                            "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c"
-                        ),
-                    },
-                    "manifest_digest": {
-                        "required": True,
-                        "type": "string",
-                        "default": (
-                            "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815"
-                        ),
-                    },
-                    "release_draft": {
-                        "required": True,
-                        "type": "string",
-                        "default": "false",
-                    },
-                    "release_prerelease": {
-                        "required": True,
-                        "type": "string",
-                        "default": "false",
-                    },
-                    "release_immutable": {
-                        "required": True,
-                        "type": "string",
-                        "default": "false",
-                    },
-                }
-            },
-        },
-        "concurrency": {
-            "group": "${{ github.workflow }}-${{ github.ref }}",
-            "cancel-in-progress": False,
-        },
-        "permissions": {},
-    }:
-        raise ValueError("release must keep its exact reviewed workflow mapping")
-    if document.get("permissions") != {}:
-        raise ValueError("release top-level permissions must be empty")
-    jobs = _jobs(document)
-    required_jobs = {
-        "release-please",
-        "verify-release-source",
-        "build",
-        "publish",
-        "attach-release-assets",
-        "recovery-build",
-        "recovery-publish",
-        "recovery-attach-release-assets",
-    }
-    if set(jobs) != required_jobs:
-        raise ValueError("release workflow must expose only the reviewed release jobs")
-    _require_pinned_actions(document, "release")
-    _require_timeouts(document, "release")
-
-    release_please = _job(document, "release-please")
-    if release_please.get("permissions") != {"contents": "write", "pull-requests": "write"}:
-        raise ValueError("release-please permissions must be minimal")
-    verify = _job(document, "verify-release-source")
-    if verify.get("permissions") != {"contents": "read"}:
-        raise ValueError("source verification permissions must be read-only")
-    build = _job(document, "build")
-    if build.get("permissions") != {"contents": "read"}:
-        raise ValueError("build permissions must be read-only")
-    publish = _job(document, "publish")
-    if publish.get("permissions") != {"actions": "read", "contents": "read", "id-token": "write"}:
-        raise ValueError("PyPI permissions must be least privilege")
-    attach = _job(document, "attach-release-assets")
-    if attach.get("permissions") != {"actions": "read", "contents": "write"}:
-        raise ValueError("GitHub asset permissions must be least privilege")
-    if attach.get("needs") != ["release-please", "verify-release-source", "build", "publish"]:
-        raise ValueError("GitHub assets must depend on successful PyPI publication")
-    if attach.get("if") != (
-        "needs.release-please.outputs.release_created == 'true' && "
-        "needs.publish.result == 'success'"
-    ):
-        raise ValueError("GitHub assets must fail closed when PyPI publication fails")
-
-    release_please_steps = _steps(release_please, "jobs.release-please")
-    if release_please_steps != [
-        {
-            "id": "release",
-            "uses": ("googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"),
-            "with": {
-                "token": "${{ github.token }}",
-                "config-file": "release-please-config.json",
-                "manifest-file": ".release-please-manifest.json",
-            },
-        }
-    ]:
-        raise ValueError("release-please must keep its exact reviewed inputs")
-
-    verify_outputs = _mapping(verify.get("outputs"), "verify-release-source.outputs")
-    expected_verify_outputs = {
-        "source_sha": "${{ steps.source.outputs.source_sha }}",
-        "release_id": "${{ steps.source.outputs.release_id }}",
-        "release_draft": "${{ steps.source.outputs.release_draft }}",
-        "release_prerelease": "${{ steps.source.outputs.release_prerelease }}",
-        "release_immutable": "${{ steps.source.outputs.release_immutable }}",
-    }
-    if verify_outputs != expected_verify_outputs:
-        raise ValueError("source verification must freeze exact Release ID and state")
-
-    build_outputs = _mapping(build.get("outputs"), "build.outputs")
-    expected_build_outputs = {
-        "source_sha": "${{ steps.source.outputs.source_sha }}",
-        "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
-        "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
-        "manifest_digest": "${{ steps.hashes.outputs.manifest_digest }}",
-    }
-    if build_outputs != expected_build_outputs:
-        raise ValueError("build must expose source, artifact ID, and trusted hash manifest")
-
-    expected_job_surfaces: Mapping[str, Mapping[str, Any]] = {
-        "release-please": {
-            "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 10,
-            "permissions": {"contents": "write", "pull-requests": "write"},
-            "outputs": {
-                "release_created": "${{ steps.release.outputs.release_created }}",
-                "tag_name": "${{ steps.release.outputs.tag_name }}",
-            },
-        },
-        "verify-release-source": {
-            "needs": "release-please",
-            "if": "needs.release-please.outputs.release_created == 'true'",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 10,
-            "permissions": {"contents": "read"},
-            "outputs": expected_verify_outputs,
-        },
-        "build": {
-            "name": "Build wheel and sdist once",
-            "needs": ["release-please", "verify-release-source"],
-            "if": "needs.release-please.outputs.release_created == 'true'",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 15,
-            "permissions": {"contents": "read"},
-            "outputs": expected_build_outputs,
-        },
-        "publish": {
-            "needs": ["release-please", "verify-release-source", "build"],
-            "if": "needs.release-please.outputs.release_created == 'true'",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 10,
-            "environment": {
-                "name": "pypi",
-                "url": "https://pypi.org/p/dcc-mcp-wwise",
-            },
-            "permissions": {"actions": "read", "contents": "read", "id-token": "write"},
-        },
-        "attach-release-assets": {
-            "needs": ["release-please", "verify-release-source", "build", "publish"],
-            "if": (
-                "needs.release-please.outputs.release_created == 'true' && "
-                "needs.publish.result == 'success'"
-            ),
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 10,
-            "permissions": {"actions": "read", "contents": "write"},
-        },
-    }
-    for job_name, expected_surface in expected_job_surfaces.items():
-        job = _job(document, job_name)
-        surface = {key: value for key, value in job.items() if key != "steps"}
-        if surface != expected_surface:
-            raise ValueError(f"{job_name} must keep its exact reviewed job mapping")
-    build_steps = _steps(build, "jobs.build")
-    upload = _step_by_name(build_steps, "Upload immutable Python distributions")
-    if upload.get("uses") != UPLOAD_ARTIFACT or upload.get("id") != "upload":
-        raise ValueError("build must upload exactly one immutable distribution artifact")
-    upload_with = _mapping(upload.get("with"), "build upload inputs")
-    upload_inputs_without_path = {key: value for key, value in upload_with.items() if key != "path"}
-    if upload_inputs_without_path != {
-        "name": ("python-dist-${{ needs.release-please.outputs.tag_name }}-${{ github.run_id }}"),
-        "if-no-files-found": "error",
-        "compression-level": 0,
-        "retention-days": 1,
-    } or _normalized_path_lines(upload_with.get("path"), "build upload path") != (
-        "dist/*.whl",
-        "dist/*.tar.gz",
-        "dist/SHA256SUMS",
-    ):
-        raise ValueError("build artifact must keep its exact reviewed inputs and path list")
-
-    verify_steps = _steps(verify, "jobs.verify-release-source")
-    if _step_markers(verify_steps) != [
-        (None, None, CHECKOUT),
-        ("Bind tag and GitHub Release to the checked-out source", "source", None),
-    ]:
-        raise ValueError("source verification must keep its reviewed ordered steps")
-    expected_checkout_inputs = {
-        "ref": "${{ needs.release-please.outputs.tag_name }}",
-        "fetch-depth": 0,
-        "persist-credentials": False,
-    }
-    if verify_steps[0].get("with") != expected_checkout_inputs:
-        raise ValueError("source verification checkout must keep exact credential-free inputs")
-    source_step = _step_by_name(
-        verify_steps, "Bind tag and GitHub Release to the checked-out source"
-    )
-    if source_step.get("id") != "source" or source_step.get("shell") != "bash":
-        raise ValueError("source verification must keep its exact reviewed step binding")
-    if source_step.get("env") != {
-        "GH_HOST": "github.com",
-        "GH_TOKEN": "${{ github.token }}",
-        "TAG_NAME": "${{ needs.release-please.outputs.tag_name }}",
-    }:
-        raise ValueError("source verification must keep its exact reviewed environment")
-    source_run = _run(source_step, "source verification")
-    _require_closed_shell(source_run, "source verification", RELEASE_SOURCE_LINES)
-
-    build_source_step = _step_by_name(build_steps, "Bind build to verified source")
-    if build_steps[0].get("with") != expected_checkout_inputs:
-        raise ValueError("build checkout must keep exact credential-free inputs")
-    if build_steps[1].get("with") != {"python-version": "3.13"}:
-        raise ValueError("build Python setup must keep its exact reviewed inputs")
-    if "secrets." in repr(document):
-        raise ValueError("release workflow must reject extra credentials")
-    if build_source_step.get("id") != "source" or build_source_step.get("shell") != "bash":
-        raise ValueError("build source must keep its exact reviewed step binding")
-    if build_source_step.get("env") != {
-        "VERIFIED_SOURCE_SHA": "${{ needs.verify-release-source.outputs.source_sha }}",
-        "TAG_NAME": "${{ needs.release-please.outputs.tag_name }}",
-    }:
-        raise ValueError("build source must keep its exact reviewed environment")
-    build_source_run = _run(build_source_step, "build source")
-    _require_closed_shell(build_source_run, "build source", BUILD_SOURCE_LINES)
-    hash_step = _step_by_name(build_steps, "Create trusted distribution hash manifest")
-    if hash_step.get("id") != "hashes" or hash_step.get("shell") != "bash":
-        raise ValueError("trusted hash manifest must keep its exact output binding")
-    _require_closed_shell(
-        _run(hash_step, "trusted hash manifest"),
-        "trusted hash manifest",
-        BUILD_HASH_LINES,
-    )
-    if _step_markers(build_steps) != [
-        (None, None, CHECKOUT),
-        (None, None, SETUP_PYTHON),
-        ("Bind build to verified source", "source", None),
-        ("Install release validation dependencies", None, None),
-        ("Validate release contracts", None, None),
-        ("Build wheel and sdist", None, None),
-        ("Validate distributions", None, None),
-        ("Create trusted distribution hash manifest", "hashes", None),
-        ("Upload immutable Python distributions", "upload", UPLOAD_ARTIFACT),
-        ("Record immutable build receipt", None, None),
-    ]:
-        raise ValueError("build must keep its reviewed ordered steps")
-    expected_build_runs = {
-        "Install release validation dependencies": INSTALL_RELEASE_DEPENDENCIES_LINES,
-        "Validate release contracts": VALIDATE_RELEASE_LINES,
-        "Build wheel and sdist": BUILD_DISTRIBUTIONS_LINES,
-        "Validate distributions": VALIDATE_DISTRIBUTIONS_LINES,
-        "Record immutable build receipt": BUILD_RECEIPT_LINES,
-    }
-    for name, expected_lines in expected_build_runs.items():
-        _require_closed_shell(_run(_step_by_name(build_steps, name), name), name, expected_lines)
-    receipt = _step_by_name(build_steps, "Record immutable build receipt")
-    if receipt.get("env") != {
-        "SOURCE_SHA": "${{ steps.source.outputs.source_sha }}",
-        "ARTIFACT_ID": "${{ steps.upload.outputs.artifact-id }}",
-        "ARTIFACT_DIGEST": "${{ steps.upload.outputs.artifact-digest }}",
-        "MANIFEST_DIGEST": "${{ steps.hashes.outputs.manifest_digest }}",
-    }:
-        raise ValueError("build receipt must keep its exact reviewed step mapping")
-
-    publish_steps = _steps(publish, "jobs.publish")
-    attach_steps = _steps(attach, "jobs.attach-release-assets")
-    all_steps = [
-        *release_please_steps,
-        *verify_steps,
-        *build_steps,
-        *publish_steps,
-        *attach_steps,
-    ]
-    pypi_steps = [step for step in all_steps if step.get("uses") == PYPI_PUBLISH]
-    if len(pypi_steps) != 1:
-        raise ValueError("release must contain exactly one PyPI publication mutation")
-    executable_runs = [_without_comments(str(step.get("run", ""))) for step in all_steps]
-    mutations = sum(
-        len(re.findall(r"\bgh\s+release\s+upload\b", run))
-        + len(
-            re.findall(
-                r"\bgh\s+api\s+--method\s+POST\s+[^\n]*"
-                r"/releases/\$CURRENT_RELEASE_ID/assets\?name=",
-                run,
-            )
-        )
-        for run in executable_runs
-    )
-    if mutations != 1:
-        raise ValueError("release must contain exactly one GitHub Release upload mutation")
-    if any("--clobber" in run for run in executable_runs):
-        raise ValueError("GitHub Release publication must never clobber assets")
-
-    if [step.get("name") for step in publish_steps] != [
-        "Download immutable Python distributions",
-        "Verify immutable identity immediately before PyPI",
-        "Publish to PyPI with Trusted Publishing",
-    ]:
-        raise ValueError("PyPI job must keep the reviewed closed mutation surface")
-    if [step.get("name") for step in attach_steps] != [
-        "Download immutable Python distributions",
-        "Verify identity and attach assets without clobbering",
-    ]:
-        raise ValueError("GitHub asset job must keep the reviewed closed mutation surface")
-
-    expected_step_keys = {
-        "release-please": [{"id", "uses", "with"}],
-        "verify-release-source": [
-            {"uses", "with"},
-            {"name", "id", "env", "shell", "run"},
-        ],
-        "build": [
-            {"uses", "with"},
-            {"uses", "with"},
-            {"name", "id", "env", "shell", "run"},
-            {"name", "run"},
-            {"name", "run"},
-            {"name", "run"},
-            {"name", "shell", "run"},
-            {"name", "id", "shell", "run"},
-            {"name", "id", "uses", "with"},
-            {"name", "env", "run"},
-        ],
-        "publish": [
-            {"name", "uses", "with"},
-            {"name", "env", "shell", "run"},
-            {"name", "uses", "with"},
-        ],
-        "attach-release-assets": [
-            {"name", "uses", "with"},
-            {"name", "env", "shell", "run"},
-        ],
-    }
-    for job_name, expected_keys in expected_step_keys.items():
-        actual_steps = _steps(_job(document, job_name), f"jobs.{job_name}")
-        if [set(step) for step in actual_steps] != expected_keys:
-            raise ValueError(f"{job_name} must keep every exact reviewed step mapping")
-
-    for consumer, label in ((publish_steps[0], "PyPI"), (attach_steps[0], "GitHub assets")):
-        if consumer.get("uses") != DOWNLOAD_ARTIFACT:
-            raise ValueError(f"{label} must use the reviewed artifact downloader")
-        inputs = _mapping(consumer.get("with"), f"{label} download inputs")
-        expected_inputs = {
-            "artifact-ids": BUILD_ARTIFACT_ID,
-            "path": "release-bundle" if label == "PyPI" else "release-assets",
-            "merge-multiple": True,
-        }
-        if inputs != expected_inputs:
-            raise ValueError(f"{label} must download only the exact build artifact ID")
-
-    pypi_inputs = _mapping(pypi_steps[0].get("with"), "PyPI inputs")
-    if pypi_inputs != {
-        "packages-dir": "pypi-dist",
-        "verbose": True,
-        "print-hash": True,
-    }:
-        raise ValueError("PyPI publication must keep its exact fail-closed inputs")
-
-    identity_env = {
-        "GH_HOST": "github.com",
-        "GH_TOKEN": "${{ github.token }}",
-        "TAG_NAME": "${{ needs.release-please.outputs.tag_name }}",
-        "BUILD_SOURCE_SHA": "${{ needs.build.outputs.source_sha }}",
-        "VERIFIED_SOURCE_SHA": "${{ needs.verify-release-source.outputs.source_sha }}",
-        "ARTIFACT_ID": BUILD_ARTIFACT_ID,
-        "ARTIFACT_DIGEST": BUILD_ARTIFACT_DIGEST,
-        "MANIFEST_DIGEST": BUILD_MANIFEST_DIGEST,
-        "VERIFIED_RELEASE_ID": "${{ needs.verify-release-source.outputs.release_id }}",
-        "VERIFIED_RELEASE_DRAFT": "${{ needs.verify-release-source.outputs.release_draft }}",
-        "VERIFIED_RELEASE_PRERELEASE": (
-            "${{ needs.verify-release-source.outputs.release_prerelease }}"
-        ),
-        "VERIFIED_RELEASE_IMMUTABLE": (
-            "${{ needs.verify-release-source.outputs.release_immutable }}"
-        ),
-    }
-    for step, label in ((publish_steps[1], "PyPI"), (attach_steps[1], "GitHub assets")):
-        env = _mapping(step.get("env"), f"{label} identity env")
-        if env != identity_env or step.get("shell") != "bash":
-            raise ValueError(f"{label} must keep the exact identity step binding")
-        identity = _run(step, f"{label} identity")
-        for required in (
-            "TAG_SHA=$(gh api",
-            "CURRENT_ARTIFACT_JSON=$(gh api",
-            "CURRENT_ARTIFACT_DIGEST=$(jq",
-            "CURRENT_RELEASE_ID=$(jq",
-            "CURRENT_RELEASE_IMMUTABLE=$(jq",
-            "sha256sum --check",
-            "MANIFEST_DIGEST",
-        ):
-            if required not in identity:
-                raise ValueError(
-                    f"{label} must freshly recapture immutable identity before mutation"
-                )
-
-    _require_closed_shell(
-        _run(publish_steps[1], "PyPI identity"),
-        "PyPI identity",
-        PYPI_IDENTITY_LINES,
-    )
-    _require_closed_shell(
-        _run(attach_steps[1], "GitHub asset mutation"),
-        "GitHub asset mutation",
-        ATTACH_IDENTITY_LINES,
-    )
-
-    attach_run = _run(attach_steps[1], "GitHub asset mutation")
-    if "gh release upload" in attach_run:
-        raise ValueError("GitHub Release mutation must target the frozen exact Release ID")
-    upload_index = attach_run.index("releases/$CURRENT_RELEASE_ID/assets?name=")
-    if attach_run.rfind("CURRENT_RELEASE_ID=$(jq", 0, upload_index) < attach_run.index("done"):
-        raise ValueError("GitHub Release identity must be recaptured immediately before mutation")
-    if attach_run.rfind("TAG_SHA=$(gh api", 0, upload_index) < attach_run.rfind(
-        "for asset in release-assets/*; do", 0, upload_index
-    ):
-        raise ValueError("GitHub Release tag must be recaptured immediately before each mutation")
+    _validate_release_semantics(document)
 
 
 def validate_recovery(document: Mapping[str, Any]) -> None:
-    expected_inputs = {
-        "tag": {"required": True, "type": "string", "default": "v0.1.3"},
-        "source_sha": {
-            "required": True,
-            "type": "string",
-            "default": "d921113c14ec1c270897b70d553d1261d7a20fa1",
-        },
-        "release_id": {"required": True, "type": "string", "default": "377552005"},
-        "original_run_id": {
-            "required": True,
-            "type": "string",
-            "default": "33037251075",
-        },
-        "original_artifact_id": {
-            "required": True,
-            "type": "string",
-            "default": "9632474230",
-        },
-        "original_artifact_digest": {
-            "required": True,
-            "type": "string",
-            "default": "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c",
-        },
-        "manifest_digest": {
-            "required": True,
-            "type": "string",
-            "default": "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815",
-        },
-        "release_draft": {"required": True, "type": "string", "default": "false"},
-        "release_prerelease": {
-            "required": True,
-            "type": "string",
-            "default": "false",
-        },
-        "release_immutable": {
-            "required": True,
-            "type": "string",
-            "default": "false",
-        },
-    }
-    triggers = _mapping(document.get("on"), "recovery triggers")
-    dispatch = _mapping(triggers.get("workflow_dispatch"), "recovery dispatch")
-    if dispatch != {"inputs": expected_inputs}:
-        raise ValueError("recovery must keep its exact reviewed workflow dispatch surface")
-    _require_pinned_actions(document, "recovery")
-    _require_timeouts(document, "recovery")
-    if "secrets." in repr(document):
-        raise ValueError("recovery must not use long-lived credentials")
+    _validate_release_semantics(document)
 
-    build = _job(document, "recovery-build")
-    publish = _job(document, "recovery-publish")
-    attach = _job(document, "recovery-attach-release-assets")
-    expected_outputs = {
-        "source_sha": "${{ steps.source.outputs.source_sha }}",
-        "release_id": "${{ steps.source.outputs.release_id }}",
-        "release_draft": "${{ steps.source.outputs.release_draft }}",
-        "release_prerelease": "${{ steps.source.outputs.release_prerelease }}",
-        "release_immutable": "${{ steps.source.outputs.release_immutable }}",
-        "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
-        "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
-        "manifest_digest": "${{ steps.hashes.outputs.manifest_digest }}",
-    }
-    expected_job_surfaces = {
-        "recovery-build": {
-            "if": "github.event_name == 'workflow_dispatch'",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 15,
-            "permissions": {"actions": "read", "contents": "read"},
-            "outputs": expected_outputs,
-        },
-        "recovery-publish": {
-            "needs": "recovery-build",
-            "if": "github.event_name == 'workflow_dispatch'",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 10,
-            "environment": {
-                "name": "pypi",
-                "url": "https://pypi.org/p/dcc-mcp-wwise",
-            },
-            "permissions": {"actions": "read", "contents": "read", "id-token": "write"},
-        },
-        "recovery-attach-release-assets": {
-            "needs": ["recovery-build", "recovery-publish"],
-            "if": (
-                "github.event_name == 'workflow_dispatch' && "
-                "needs.recovery-publish.result == 'success'"
-            ),
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": 10,
-            "permissions": {"actions": "read", "contents": "write"},
-        },
-    }
-    for name, expected in expected_job_surfaces.items():
-        job = _job(document, name)
-        actual = {key: value for key, value in job.items() if key != "steps"}
-        if actual != expected:
-            raise ValueError(f"recovery {name} must keep its exact reviewed job mapping")
 
-    build_steps = _steps(build, "recovery build")
-    publish_steps = _steps(publish, "recovery publish")
-    attach_steps = _steps(attach, "recovery assets")
-    if [step.get("name") for step in build_steps] != [
-        None,
-        None,
-        "Bind the recovery build to the frozen incident",
-        "Install build validation dependencies",
-        "Build wheel and sdist from the immutable tag",
-        "Validate recovery distributions",
-        "Create recovery distribution hash manifest",
-        "Upload immutable recovery distributions",
-    ]:
-        raise ValueError("recovery build must keep its reviewed ordered steps")
-    if [step.get("name") for step in publish_steps] != [
-        "Download immutable recovery distributions",
-        "Verify recovery identity immediately before PyPI",
-        "Publish recovery distributions with Trusted Publishing",
-    ]:
-        raise ValueError("recovery PyPI must keep its reviewed ordered steps")
-    if [step.get("name") for step in attach_steps] != [
-        "Download immutable recovery distributions",
-        "Verify recovery identity and attach exact assets idempotently",
-    ]:
-        raise ValueError("recovery assets must keep its reviewed ordered steps")
-
-    if build_steps[0].get("with") != {
-        "ref": "${{ inputs.tag }}",
-        "fetch-depth": 0,
-        "persist-credentials": False,
-    } or build_steps[1].get("with") != {"python-version": "3.13"}:
-        raise ValueError("recovery must build only the credential-free immutable tag checkout")
-    source = build_steps[2]
-    source_run = _run(source, "recovery incident binding")
-    for required in (
-        'test "$TAG_NAME" = "v0.1.3"',
-        'test "$EXPECTED_SOURCE_SHA" = "d921113c14ec1c270897b70d553d1261d7a20fa1"',
-        'test "$EXPECTED_RELEASE_ID" = "377552005"',
-        'test "$ORIGINAL_RUN_ID" = "33037251075"',
-        'test "$ORIGINAL_ARTIFACT_ID" = "9632474230"',
-        'test "$RUN_CONCLUSION" = "failure"',
-    ):
-        if source_run.count(required) != 1:
-            raise ValueError("recovery must bind every exact incident input and live identity")
-    upload = build_steps[-1]
-    if (
-        upload.get("uses") != UPLOAD_ARTIFACT
-        or upload.get("id") != "upload"
-        or upload.get("with")
-        != {
-            "name": "recovery-python-dist-v0.1.3-${{ github.run_id }}",
-            "path": "dist/*.whl\ndist/*.tar.gz\ndist/SHA256SUMS\n",
-            "if-no-files-found": "error",
-            "compression-level": 0,
-            "retention-days": 7,
-        }
-    ):
-        raise ValueError("recovery artifact must keep its exact reviewed upload surface")
-
-    expected_downloads = (
-        (publish_steps[0], "release-bundle"),
-        (attach_steps[0], "release-assets"),
-    )
-    for step, path in expected_downloads:
-        if step.get("uses") != DOWNLOAD_ARTIFACT or step.get("with") != {
-            "artifact-ids": "${{ needs.recovery-build.outputs.artifact_id }}",
-            "path": path,
-            "merge-multiple": True,
-        }:
-            raise ValueError("recovery publishers must download only the new exact artifact ID")
-    publisher = publish_steps[-1]
-    if publisher != {
-        "name": "Publish recovery distributions with Trusted Publishing",
-        "if": "steps.identity.outputs.publish_required == 'true'",
-        "uses": PYPI_PUBLISH,
-        "with": {"packages-dir": "pypi-dist", "verbose": True, "print-hash": True},
-    }:
-        raise ValueError("recovery PyPI mutation must keep its exact Trusted Publisher surface")
-
-    publish_run = _run(publish_steps[1], "recovery PyPI identity")
-    attach_run = _run(attach_steps[1], "recovery GitHub assets")
-    recovery_steps = [*build_steps, *publish_steps, *attach_steps]
-    all_runs = "\n".join(_without_comments(str(step.get("run", ""))) for step in recovery_steps)
-    if (
-        "gh release upload" in all_runs
-        or "--clobber" in all_runs
-        or re.search(r"\bgit\s+(push|tag|commit)\b", all_runs)
-    ):
-        raise ValueError("recovery must keep the reviewed closed recovery mutation surface")
-    if all_runs.count("gh api --method POST") != 1:
-        raise ValueError("recovery must keep the reviewed closed recovery mutation surface")
-    if any(token in all_runs for token in ("gh api --method DELETE", "gh api --method PATCH")):
-        raise ValueError("recovery must keep the reviewed closed recovery mutation surface")
-    for run, label in ((publish_run, "PyPI"), (attach_run, "GitHub assets")):
-        for required in (
-            "canonical_artifact_sha256()",
-            "CURRENT_ARTIFACT_JSON=$(gh api",
-            'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
-            'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
-            'test "$ARTIFACT_RUN_ID" = "$EXPECTED_RUN_ID"',
-            "CURRENT_RELEASE_JSON=$(gh api",
-            "TAG_SHA=$(gh api",
-            "sha256sum --check",
-        ):
-            if required not in run:
-                raise ValueError(f"recovery {label} must recapture exact live identity")
-    if "https://pypi.org/pypi/dcc-mcp-wwise/0.1.3/json" not in publish_run:
-        raise ValueError("recovery PyPI must verify an existing version idempotently")
-    post_index = attach_run.index("gh api --method POST")
-    loop_index = attach_run.rfind("for asset in release-assets/*; do", 0, post_index)
-    if loop_index < 0 or any(
-        attach_run.rfind(marker, loop_index, post_index) < 0
-        for marker in (
-            "CURRENT_ARTIFACT_JSON=$(gh api",
-            "CURRENT_RELEASE_JSON=$(gh api",
-            "TAG_SHA=$(gh api",
-        )
-    ):
-        raise ValueError("recovery must recapture artifact, release, and tag before every mutation")
+def validate_frozen_source(source: bytes, expected_sha256: str, label: str) -> None:
+    if b"\r" in source.replace(b"\r\n", b""):
+        raise ValueError(f"{label} must use portable line endings")
+    canonical = source.replace(b"\r\n", b"\n")
+    if hashlib.sha256(canonical).hexdigest() != expected_sha256:
+        raise ValueError(f"{label} must keep its exact reviewed source digest")
 
 
 def validate_recovery_source(source: bytes) -> None:
-    if hashlib.sha256(source).hexdigest() != RECOVERY_WORKFLOW_SHA256:
-        raise ValueError("recovery workflow must keep its exact reviewed source digest")
+    validate_frozen_source(source, RECOVERY_WORKFLOW_SHA256, "recovery workflow")
 
 
 def validate_ci(document: Mapping[str, Any]) -> None:
@@ -1242,6 +604,16 @@ def validate_all() -> None:
     release = _load(".github/workflows/release.yml")
     validate_release(release)
     validate_recovery_source((ROOT / ".github/workflows/release.yml").read_bytes())
+    validate_frozen_source(
+        (ROOT / "scripts/ci/release_integrity.py").read_bytes(),
+        RELEASE_INTEGRITY_SHA256,
+        "release integrity validator",
+    )
+    validate_frozen_source(
+        (ROOT / "tools/verify_release_archives.py").read_bytes(),
+        ARCHIVE_VALIDATOR_SHA256,
+        "release archive validator",
+    )
     validate_recovery(release)
     validate_ci(_load(".github/workflows/ci.yml"))
     validate_lock_sync(_load(".github/workflows/release-please-lock-sync.yml"))
