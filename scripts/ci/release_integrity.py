@@ -15,6 +15,8 @@ from packaging.utils import canonicalize_name
 
 BARE_SHA256 = re.compile(r"([0-9a-f]{64})\Z")
 SERVER_ARTIFACT_SHA256 = re.compile(r"sha256:([0-9a-f]{64})\Z")
+RELEASE_NODE_ID = re.compile(r"RE_[A-Za-z0-9_-]+\Z")
+MAX_GITHUB_INTEGER = (1 << 63) - 1
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,7 @@ class IncidentIdentity:
 class ReleaseIdentity:
     release_id: int
     node_id: str
+    name: str
     tag: str
     target: str
     draft: bool
@@ -90,6 +93,18 @@ def _object(value: object, label: str) -> Mapping[str, Any]:
     return value
 
 
+def _positive_int(value: object, label: str) -> int:
+    if type(value) is not int or not 0 < value <= MAX_GITHUB_INTEGER:
+        raise ValueError(f"{label} must be an exact positive integer")
+    return value
+
+
+def _required_string(value: object, label: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{label} must be an exact non-empty string")
+    return value
+
+
 def _load(path: Path) -> Mapping[str, Any]:
     return _object(json.loads(path.read_text(encoding="utf-8")), path.name)
 
@@ -98,13 +113,17 @@ def verify_artifact(path: Path, expected: ArtifactIdentity, *, require_live: boo
     payload = _load(path)
     run = _object(payload.get("workflow_run"), "artifact workflow_run")
     actual = ArtifactIdentity(
-        artifact_id=payload.get("id"),
+        artifact_id=_positive_int(payload.get("id"), "artifact identity fields: artifact id"),
         node_id=payload.get("node_id"),
         name=payload.get("name"),
         sha256=server_artifact_sha256(payload.get("digest")),
-        run_id=run.get("id"),
-        repository_id=run.get("repository_id"),
-        head_repository_id=run.get("head_repository_id"),
+        run_id=_positive_int(run.get("id"), "artifact identity fields: run id"),
+        repository_id=_positive_int(
+            run.get("repository_id"), "artifact identity fields: repository id"
+        ),
+        head_repository_id=_positive_int(
+            run.get("head_repository_id"), "artifact identity fields: head repository id"
+        ),
         head_sha=run.get("head_sha"),
     )
     if expected.node_id is None:
@@ -127,32 +146,36 @@ def verify_artifact(path: Path, expected: ArtifactIdentity, *, require_live: boo
         raise ValueError("artifact is expired")
 
 
-def _repository_identity(value: object) -> tuple[object, object, object, object]:
+def _repository_identity(value: object) -> tuple[int, str, str, str]:
     repository = _object(value, "repository")
     owner = _object(repository.get("owner"), "repository owner")
     return (
-        repository.get("id"),
-        owner.get("login"),
-        repository.get("name"),
-        repository.get("full_name"),
+        _positive_int(repository.get("id"), "repository id"),
+        _required_string(owner.get("login"), "repository owner login"),
+        _required_string(repository.get("name"), "repository name"),
+        _required_string(repository.get("full_name"), "repository full name"),
     )
 
 
 def verify_incident(path: Path, expected: IncidentIdentity) -> None:
     payload = _load(path)
+    repository = _repository_identity(payload.get("repository"))
+    head_repository = _repository_identity(payload.get("head_repository"))
     actual = IncidentIdentity(
-        run_id=payload.get("id"),
-        node_id=payload.get("node_id"),
-        name=payload.get("name"),
-        path=payload.get("path"),
-        event=payload.get("event"),
-        attempt=payload.get("run_attempt"),
-        workflow_id=payload.get("workflow_id"),
-        repository_id=_repository_identity(payload.get("repository"))[0],
-        repository_owner=_repository_identity(payload.get("repository"))[1],
-        repository_name=_repository_identity(payload.get("repository"))[2],
-        repository_full_name=_repository_identity(payload.get("repository"))[3],
-        head_sha=payload.get("head_sha"),
+        run_id=_positive_int(payload.get("id"), "incident identity fields: run id"),
+        node_id=_required_string(payload.get("node_id"), "incident identity fields: node id"),
+        name=_required_string(payload.get("name"), "incident identity fields: name"),
+        path=_required_string(payload.get("path"), "incident identity fields: path"),
+        event=_required_string(payload.get("event"), "incident identity fields: event"),
+        attempt=_positive_int(payload.get("run_attempt"), "incident identity fields: run attempt"),
+        workflow_id=_positive_int(
+            payload.get("workflow_id"), "incident identity fields: workflow id"
+        ),
+        repository_id=repository[0],
+        repository_owner=repository[1],
+        repository_name=repository[2],
+        repository_full_name=repository[3],
+        head_sha=_required_string(payload.get("head_sha"), "incident identity fields: head SHA"),
     )
     if actual != expected:
         raise ValueError("release incident does not match the frozen identity")
@@ -162,25 +185,61 @@ def verify_incident(path: Path, expected: IncidentIdentity) -> None:
         expected.repository_name,
         expected.repository_full_name,
     )
-    if _repository_identity(payload.get("head_repository")) != expected_repository:
+    if head_repository != expected_repository:
         raise ValueError("release incident head repository is not the frozen repository")
-    if payload.get("status") != "completed" or payload.get("conclusion") != "failure":
+    if (
+        _required_string(payload.get("status"), "incident status") != "completed"
+        or _required_string(payload.get("conclusion"), "incident conclusion") != "failure"
+    ):
         raise ValueError("release incident is not the frozen terminal failure")
 
 
-def verify_release(path: Path, expected: ReleaseIdentity) -> None:
+def _release_state(payload: Mapping[str, Any]) -> tuple[bool, bool, bool]:
+    fields = ("draft", "prerelease", "immutable")
+    for field in fields:
+        if field not in payload or type(payload[field]) is not bool:
+            raise ValueError("release state fields must be present exact booleans")
+    state = (payload["draft"], payload["prerelease"], payload["immutable"])
+    if state != (False, False, False):
+        raise ValueError("release state must be exactly false/false/false")
+    return state
+
+
+def _release_identity(path: Path) -> ReleaseIdentity:
     payload = _load(path)
-    actual = ReleaseIdentity(
-        release_id=payload.get("id"),
-        node_id=payload.get("node_id"),
-        tag=payload.get("tag_name"),
-        target=payload.get("target_commitish"),
-        draft=payload.get("draft"),
-        prerelease=payload.get("prerelease"),
-        immutable=payload.get("immutable", False),
+    draft, prerelease, immutable = _release_state(payload)
+    node_id = _required_string(payload.get("node_id"), "release node id")
+    if RELEASE_NODE_ID.fullmatch(node_id) is None:
+        raise ValueError("release node id must use the exact GitHub base64url form")
+    return ReleaseIdentity(
+        release_id=_positive_int(payload.get("id"), "release id"),
+        node_id=node_id,
+        name=_required_string(payload.get("name"), "release name"),
+        tag=_required_string(payload.get("tag_name"), "release tag"),
+        target=_required_string(payload.get("target_commitish"), "release target"),
+        draft=draft,
+        prerelease=prerelease,
+        immutable=immutable,
     )
+
+
+def verify_release(path: Path, expected: ReleaseIdentity) -> None:
+    actual = _release_identity(path)
     if actual != expected:
         raise ValueError("release does not match the frozen identity")
+
+
+def capture_release(
+    path: Path, *, expected_name: str, expected_tag: str, expected_target: str
+) -> ReleaseIdentity:
+    actual = _release_identity(path)
+    if (
+        actual.name != expected_name
+        or actual.tag != expected_tag
+        or actual.target != expected_target
+    ):
+        raise ValueError("release does not match the captured identity")
+    return actual
 
 
 def _distribution_kind(path: Path) -> tuple[str, str]:
@@ -249,19 +308,9 @@ def verify_pypi_release(path: Path, distributions: Path, *, project: str, versio
             raise ValueError("PyPI upload timestamp must include a timezone")
 
 
-ORIGINAL_ARTIFACT = ArtifactIdentity(
-    artifact_id=9632474230,
-    node_id="MDg6QXJ0aWZhY3Q5NjMyNDc0MjMw",
-    name="python-dist-v0.1.3-33037251075",
-    sha256="9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c",
-    run_id=33037251075,
-    repository_id=1316365654,
-    head_repository_id=1316365654,
-    head_sha="d921113c14ec1c270897b70d553d1261d7a20fa1",
-)
 INCIDENT = IncidentIdentity(
-    run_id=33037251075,
-    node_id="WFR_kwLOTnYlVs8AAAAHsSxyAw",
+    run_id=33098798286,
+    node_id="WFR_kwLOTnYlVs8AAAAHtNeUzg",
     name="Release",
     path=".github/workflows/release.yml",
     event="push",
@@ -271,13 +320,14 @@ INCIDENT = IncidentIdentity(
     repository_owner="dcc-mcp",
     repository_name="dcc-mcp-wwise",
     repository_full_name="dcc-mcp/dcc-mcp-wwise",
-    head_sha="d921113c14ec1c270897b70d553d1261d7a20fa1",
+    head_sha="e31a6b9430f1b9f9494401c66d52e87ecb31fca4",
 )
 RELEASE = ReleaseIdentity(
-    release_id=377552005,
-    node_id="RE_kwDOTnYlVs4WgPyF",
-    tag="v0.1.3",
-    target="d921113c14ec1c270897b70d553d1261d7a20fa1",
+    release_id=378005400,
+    node_id="RE_kwDOTnYlVs4Wh-eY",
+    name="v0.1.4",
+    tag="v0.1.4",
+    target="e31a6b9430f1b9f9494401c66d52e87ecb31fca4",
     draft=False,
     prerelease=False,
     immutable=False,
@@ -287,13 +337,16 @@ RELEASE = ReleaseIdentity(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
-    original = subparsers.add_parser("original-artifact")
-    original.add_argument("json", type=Path)
-    original.add_argument("--allow-expired", action="store_true")
     incident = subparsers.add_parser("incident")
     incident.add_argument("json", type=Path)
     release = subparsers.add_parser("release")
     release.add_argument("json", type=Path)
+    release.add_argument("--id", type=int)
+    release.add_argument("--node-id")
+    release.add_argument("--name")
+    release.add_argument("--tag")
+    release.add_argument("--target")
+    release.add_argument("--github-output", type=Path)
     artifact = subparsers.add_parser("artifact")
     artifact.add_argument("json", type=Path)
     artifact.add_argument("--id", type=int, required=True)
@@ -310,23 +363,68 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
-    if arguments.command == "original-artifact":
-        verify_artifact(arguments.json, ORIGINAL_ARTIFACT, require_live=not arguments.allow_expired)
-    elif arguments.command == "incident":
+    if arguments.command == "incident":
         verify_incident(arguments.json, INCIDENT)
     elif arguments.command == "release":
-        verify_release(arguments.json, RELEASE)
+        identity_values = (
+            arguments.id,
+            arguments.node_id,
+            arguments.name,
+            arguments.tag,
+            arguments.target,
+        )
+        if arguments.github_output is not None:
+            if arguments.id is not None or arguments.node_id is not None:
+                raise ValueError("release capture cannot accept a preselected id or node id")
+            name = _required_string(arguments.name, "expected release name")
+            tag = _required_string(arguments.tag, "expected release tag")
+            target = _required_string(arguments.target, "expected release target")
+            actual = capture_release(
+                arguments.json,
+                expected_name=name,
+                expected_tag=tag,
+                expected_target=target,
+            )
+            with arguments.github_output.open("a", encoding="utf-8", newline="\n") as output:
+                output.write(f"release_id={actual.release_id}\n")
+                output.write(f"release_node_id={actual.node_id}\n")
+                output.write(f"release_name={actual.name}\n")
+                output.write("release_draft=false\n")
+                output.write("release_prerelease=false\n")
+                output.write("release_immutable=false\n")
+        elif any(value is not None for value in identity_values):
+            if any(value is None for value in identity_values):
+                raise ValueError("full expected release identity is required")
+            verify_release(
+                arguments.json,
+                ReleaseIdentity(
+                    release_id=_positive_int(arguments.id, "expected release id"),
+                    node_id=_required_string(arguments.node_id, "expected release node id"),
+                    name=_required_string(arguments.name, "expected release name"),
+                    tag=_required_string(arguments.tag, "expected release tag"),
+                    target=_required_string(arguments.target, "expected release target"),
+                    draft=False,
+                    prerelease=False,
+                    immutable=False,
+                ),
+            )
+        else:
+            verify_release(arguments.json, RELEASE)
     elif arguments.command == "artifact":
         verify_artifact(
             arguments.json,
             ArtifactIdentity(
-                artifact_id=arguments.id,
+                artifact_id=_positive_int(arguments.id, "expected artifact id"),
                 node_id=None,
                 name=arguments.name,
                 sha256=upload_artifact_sha256(arguments.sha256),
-                run_id=arguments.run_id,
-                repository_id=arguments.repository_id,
-                head_repository_id=arguments.repository_id,
+                run_id=_positive_int(arguments.run_id, "expected artifact run id"),
+                repository_id=_positive_int(
+                    arguments.repository_id, "expected artifact repository id"
+                ),
+                head_repository_id=_positive_int(
+                    arguments.repository_id, "expected artifact head repository id"
+                ),
                 head_sha=arguments.head_sha,
             ),
             require_live=True,
@@ -336,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.json,
             arguments.distributions,
             project="dcc-mcp-wwise",
-            version="0.1.3",
+            version="0.1.4",
         )
     return 0
 

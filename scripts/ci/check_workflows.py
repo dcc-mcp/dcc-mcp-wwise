@@ -21,9 +21,9 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
-RECOVERY_WORKFLOW_SHA256 = "7669fa832317c04ab6bd839a699981697ff6a28c0235cfaa197772da683d4b40"
-RELEASE_SEMANTIC_SHA256 = "607065fdc949a9d2f2c3f9ef1565c393284248f777ba7e686030873ce7425c5b"
-RELEASE_INTEGRITY_SHA256 = "41d7f5dd539bf2c2df02f37a19783f5132e2ff15bf4bbde634fc6c39bdc51e64"
+RECOVERY_WORKFLOW_SHA256 = "b0e208ac3a9bbde020839e978d9200f6769f0daec7d8439ce9d7b13d6e6bf2ff"
+RELEASE_SEMANTIC_SHA256 = "0b3b3a7aff6b0358568e650864410736a0ada5a929b42ebb1ebc5987a00d4f31"
+RELEASE_INTEGRITY_SHA256 = "c8b15f136aa59ed7473a67cd4af389c2c105ffe3c38894a4c397e41950a0a59e"
 ARCHIVE_VALIDATOR_SHA256 = "31b77b7fad89a8813e25d78bbcfa303853509d852db03320335707c002da9433"
 SURFACE_ERROR = (
     "closed recovery mutation surface; clobber; exactly one GitHub Release upload mutation; "
@@ -138,17 +138,13 @@ PYPI_IDENTITY_LINES = (
     "(cd release-bundle && sha256sum --check SHA256SUMS)",
     "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
     'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
+    'printf "%s" "$CURRENT_RELEASE_JSON" > release.json',
+    "python scripts/ci/release_integrity.py release release.json",
     "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
     "RELEASE_TARGET=$(jq -r '.target_commitish' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< \"$CURRENT_RELEASE_JSON\")",
     'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"',
     'test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"',
-    'test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"',
-    'test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"',
-    'test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"',
     "test \"$(find release-bundle -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
     "test \"$(find release-bundle -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
     "test \"$(find release-bundle -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)\" -eq 1",
@@ -172,17 +168,13 @@ ATTACH_IDENTITY_LINES = (
     "(cd release-assets && sha256sum --check SHA256SUMS)",
     "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
     'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
+    'printf "%s" "$CURRENT_RELEASE_JSON" > release.json',
+    "python scripts/ci/release_integrity.py release release.json",
     "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
     "RELEASE_TARGET=$(jq -r '.target_commitish' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< \"$CURRENT_RELEASE_JSON\")",
     'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"',
     'test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"',
-    'test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"',
-    'test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"',
-    'test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"',
     "test \"$(find release-assets -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
     "test \"$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
     "test \"$(find release-assets -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)\" -eq 1",
@@ -203,16 +195,12 @@ ATTACH_IDENTITY_LINES = (
     "for asset in release-assets/*; do",
     'name=$(basename "$asset")',
     'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
+    'printf "%s" "$CURRENT_RELEASE_JSON" > release.json',
+    "python scripts/ci/release_integrity.py release release.json",
     "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
     "RELEASE_TARGET=$(jq -r '.target_commitish' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< \"$CURRENT_RELEASE_JSON\")",
-    "CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< \"$CURRENT_RELEASE_JSON\")",
     'test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"',
     'test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"',
-    'test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"',
-    'test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"',
-    'test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"',
     "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
     'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"',
     "ENCODED_NAME=$(jq -rn --arg value \"$name\" '$value | @uri')",
