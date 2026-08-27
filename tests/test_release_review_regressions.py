@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from glob import glob
 from pathlib import Path
+from shutil import copy2
 
+import pytest
 from dcc_mcp_core import yaml_loads
+from twine.exceptions import InvalidDistribution
+from twine.package import PackageFile
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -13,11 +18,44 @@ def _load(path: Path):
     return yaml_loads(path.read_text(encoding="utf-8"))
 
 
+def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
+    workflow = _load(RELEASE_WORKFLOW)
+    publish = workflow["jobs"]["publish"]
+    download = publish["steps"][0]
+    publication = publish["steps"][-1]
+    bundle = tmp_path / download["with"]["path"]
+    packages = tmp_path / publication["with"]["packages-dir"]
+    bundle.mkdir(parents=True)
+    for name in (
+        "dcc_mcp_wwise-1.0.0-py3-none-any.whl",
+        "dcc_mcp_wwise-1.0.0.tar.gz",
+        "SHA256SUMS",
+    ):
+        (bundle / name).touch()
+
+    with pytest.raises(InvalidDistribution, match="Unknown distribution format"):
+        PackageFile.from_filename(str(bundle / "SHA256SUMS"), None)
+
+    identity_run = publish["steps"][1]["run"]
+    assert "cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/" in identity_run
+    packages.mkdir()
+    for pattern in ("*.whl", "*.tar.gz"):
+        for distribution in bundle.glob(pattern):
+            copy2(distribution, packages / distribution.name)
+    action_equivalent_glob = glob(str(packages / "*"))
+    assert action_equivalent_glob
+    assert all(path.endswith((".whl", ".tar.gz")) for path in action_equivalent_glob)
+    assert download["with"]["path"] != publication["with"]["packages-dir"]
+    assert "dist/SHA256SUMS" in workflow["jobs"]["build"]["steps"][-2]["with"]["path"]
+
+
 def test_downloaded_release_artifacts_are_hash_verified_fail_closed_before_publish() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     download = workflow.index("actions/download-artifact")
     pypi_publish = workflow.index("pypa/gh-action-pypi-publish", download)
-    github_publish = workflow.index("gh release upload", download)
+    github_publish = workflow.index(
+        "releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME", download
+    )
     verification = workflow.find("sha256sum --check", download)
 
     assert verification != -1, "downloaded files must be rehashed against trusted per-file digests"
@@ -91,5 +129,7 @@ def test_release_identity_freezes_id_and_state_and_recaptures_before_mutations()
         assert "CURRENT_RELEASE_IMMUTABLE=$(jq" in identity["run"]
 
     attach_run = attach["steps"][1]["run"]
-    upload = attach_run.index("gh release upload")
+    assert "gh release upload" not in attach_run
+    upload = attach_run.index("releases/$CURRENT_RELEASE_ID/assets?name=")
+    assert '--input "$asset"' in attach_run[upload:]
     assert attach_run.rfind("CURRENT_RELEASE_JSON=$(gh api", 0, upload) > attach_run.index("done")

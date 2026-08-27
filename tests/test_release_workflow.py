@@ -72,6 +72,50 @@ def test_release_contract_rejects_a_second_pypi_mutation() -> None:
         validate_release(document)
 
 
+def test_release_contract_freezes_release_please_inputs() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    release = document["jobs"]["release-please"]["steps"][0]
+    release["with"]["token"] = "${{ secrets.PERSONAL_ACCESS_TOKEN }}"
+    release["with"]["repo-url"] = "other/repository"
+
+    with pytest.raises(ValueError, match="release-please.*inputs"):
+        validate_release(document)
+
+
+def test_release_contract_freezes_checkout_inputs_and_every_run_body() -> None:
+    from scripts.ci.check_workflows import validate_release
+
+    document = _release_document()
+    checkout = document["jobs"]["build"]["steps"][0]
+    checkout["with"]["persist-credentials"] = True
+    checkout["with"]["token"] = "${{ secrets.PERSONAL_ACCESS_TOKEN }}"
+    with pytest.raises(ValueError, match="checkout.*inputs"):
+        validate_release(document)
+
+    original = _release_document()
+    run_steps = [
+        (job_name, index)
+        for job_name, job in original["jobs"].items()
+        for index, step in enumerate(job["steps"])
+        if "run" in step
+    ]
+    assert run_steps
+    for job_name, index in run_steps:
+        document = _release_document()
+        document["jobs"][job_name]["steps"][index]["run"] += (
+            '\ngit push "https://github.com/other/repository.git" HEAD:main\n'
+        )
+        with pytest.raises(ValueError, match="closed mutation surface"):
+            validate_release(document)
+
+    document = _release_document()
+    document["jobs"]["build"]["steps"][4]["env"] = {"WRITE_TOKEN": "${{ secrets.WRITE_TOKEN }}"}
+    with pytest.raises(ValueError, match="extra credentials"):
+        validate_release(document)
+
+
 def test_release_consumers_are_bound_to_the_build_artifact_id() -> None:
     from scripts.ci.check_workflows import validate_release
 
@@ -88,8 +132,8 @@ def test_release_rejects_warning_only_download_hash_verification() -> None:
     document = _release_document()
     identity = document["jobs"]["publish"]["steps"][1]
     identity["run"] = identity["run"].replace(
-        "(cd dist && sha256sum --check SHA256SUMS)",
-        '(cd dist && sha256sum --check SHA256SUMS) || echo "::warning::digest mismatch"',
+        "(cd release-bundle && sha256sum --check SHA256SUMS)",
+        '(cd release-bundle && sha256sum --check SHA256SUMS) || echo "::warning::digest mismatch"',
     )
 
     with pytest.raises(ValueError, match="closed mutation surface"):

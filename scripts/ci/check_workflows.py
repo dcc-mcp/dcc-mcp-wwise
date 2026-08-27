@@ -60,14 +60,38 @@ BUILD_HASH_LINES = (
     '[[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
     'echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"',
 )
+INSTALL_RELEASE_DEPENDENCIES_LINES = ('python -m pip install -e ".[dev]" "uv==0.11.19"',)
+VALIDATE_RELEASE_LINES = (
+    "python scripts/ci/check_uv_lock.py",
+    "python scripts/ci/check_workflows.py",
+    "uv lock --check",
+    "python -m pip check",
+    "pytest",
+    "python tools/lint_skills.py",
+)
+BUILD_DISTRIBUTIONS_LINES = ("python -m build",)
+VALIDATE_DISTRIBUTIONS_LINES = (
+    "set -euo pipefail",
+    "python -m twine check dist/*",
+    "python tools/verify_wheel.py dist/*.whl",
+    "test \"$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
+    "test \"$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
+    'test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2',
+)
+BUILD_RECEIPT_LINES = (
+    'echo "source_sha=$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"',
+    'echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_STEP_SUMMARY"',
+    'echo "artifact_digest=$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"',
+    'echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_STEP_SUMMARY"',
+)
 PYPI_IDENTITY_LINES = (
     "set -euo pipefail",
     'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test -n "$ARTIFACT_ID"',
     '[[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
     '[[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
-    'test "$(sha256sum dist/SHA256SUMS | awk \'{print $1}\')" = "$MANIFEST_DIGEST"',
-    "(cd dist && sha256sum --check SHA256SUMS)",
+    'test "$(sha256sum release-bundle/SHA256SUMS | awk \'{print $1}\')" = "$MANIFEST_DIGEST"',
+    "(cd release-bundle && sha256sum --check SHA256SUMS)",
     "TAG_SHA=$(gh api \"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME\" --jq '.object.sha')",
     'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
     "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
@@ -81,10 +105,15 @@ PYPI_IDENTITY_LINES = (
     'test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"',
     'test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"',
     'test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"',
-    "test \"$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
-    "test \"$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
-    "test \"$(find dist -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)\" -eq 1",
-    'test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3',
+    "test \"$(find release-bundle -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
+    "test \"$(find release-bundle -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
+    "test \"$(find release-bundle -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)\" -eq 1",
+    'test "$(find release-bundle -maxdepth 1 -type f | wc -l)" -eq 3',
+    "mkdir pypi-dist",
+    "cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/",
+    "test \"$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)\" -eq 1",
+    "test \"$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)\" -eq 1",
+    'test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2',
 )
 ATTACH_IDENTITY_LINES = (
     "set -euo pipefail",
@@ -123,6 +152,8 @@ ATTACH_IDENTITY_LINES = (
     "exit 1",
     "fi",
     "done",
+    "for asset in release-assets/*; do",
+    'name=$(basename "$asset")',
     'CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")',
     "CURRENT_RELEASE_ID=$(jq -r '.id' <<< \"$CURRENT_RELEASE_JSON\")",
     "RELEASE_TARGET=$(jq -r '.target_commitish' <<< \"$CURRENT_RELEASE_JSON\")",
@@ -134,7 +165,13 @@ ATTACH_IDENTITY_LINES = (
     'test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"',
     'test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"',
     'test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"',
-    'gh release upload "$TAG_NAME" release-assets/* --repo "$GITHUB_REPOSITORY"',
+    "ENCODED_NAME=$(jq -rn --arg value \"$name\" '$value | @uri')",
+    (
+        'gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/'
+        'releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME" '
+        '--header "Content-Type: application/octet-stream" --input "$asset"'
+    ),
+    "done",
 )
 LOCK_REGENERATE_RUN = 'python -m pip install "uv==0.11.19"\nuv lock\n'
 LOCK_STATE_RUN = (
@@ -312,14 +349,19 @@ def validate_release(document: Mapping[str, Any]) -> None:
     ):
         raise ValueError("GitHub assets must fail closed when PyPI publication fails")
 
-    if _step_markers(_steps(release_please, "jobs.release-please")) != [
-        (
-            None,
-            "release",
-            "googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7",
-        )
+    release_please_steps = _steps(release_please, "jobs.release-please")
+    if release_please_steps != [
+        {
+            "id": "release",
+            "uses": ("googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7"),
+            "with": {
+                "token": "${{ github.token }}",
+                "config-file": "release-please-config.json",
+                "manifest-file": ".release-please-manifest.json",
+            },
+        }
     ]:
-        raise ValueError("release-please must keep its exact reviewed step")
+        raise ValueError("release-please must keep its exact reviewed inputs")
 
     verify_outputs = _mapping(verify.get("outputs"), "verify-release-source.outputs")
     expected_verify_outputs = {
@@ -360,6 +402,13 @@ def validate_release(document: Mapping[str, Any]) -> None:
         ("Bind tag and GitHub Release to the checked-out source", "source", None),
     ]:
         raise ValueError("source verification must keep its reviewed ordered steps")
+    expected_checkout_inputs = {
+        "ref": "${{ needs.release-please.outputs.tag_name }}",
+        "fetch-depth": 0,
+        "persist-credentials": False,
+    }
+    if verify_steps[0].get("with") != expected_checkout_inputs:
+        raise ValueError("source verification checkout must keep exact credential-free inputs")
     source_step = _step_by_name(
         verify_steps, "Bind tag and GitHub Release to the checked-out source"
     )
@@ -375,6 +424,12 @@ def validate_release(document: Mapping[str, Any]) -> None:
     _require_closed_shell(source_run, "source verification", RELEASE_SOURCE_LINES)
 
     build_source_step = _step_by_name(build_steps, "Bind build to verified source")
+    if build_steps[0].get("with") != expected_checkout_inputs:
+        raise ValueError("build checkout must keep exact credential-free inputs")
+    if build_steps[1].get("with") != {"python-version": "3.13"}:
+        raise ValueError("build Python setup must keep its exact reviewed inputs")
+    if "secrets." in repr(document):
+        raise ValueError("release workflow must reject extra credentials")
     if build_source_step.get("id") != "source" or build_source_step.get("shell") != "bash":
         raise ValueError("build source must keep its exact reviewed step binding")
     if build_source_step.get("env") != {
@@ -405,6 +460,15 @@ def validate_release(document: Mapping[str, Any]) -> None:
         ("Record immutable build receipt", None, None),
     ]:
         raise ValueError("build must keep its reviewed ordered steps")
+    expected_build_runs = {
+        "Install release validation dependencies": INSTALL_RELEASE_DEPENDENCIES_LINES,
+        "Validate release contracts": VALIDATE_RELEASE_LINES,
+        "Build wheel and sdist": BUILD_DISTRIBUTIONS_LINES,
+        "Validate distributions": VALIDATE_DISTRIBUTIONS_LINES,
+        "Record immutable build receipt": BUILD_RECEIPT_LINES,
+    }
+    for name, expected_lines in expected_build_runs.items():
+        _require_closed_shell(_run(_step_by_name(build_steps, name), name), name, expected_lines)
 
     publish_steps = _steps(publish, "jobs.publish")
     attach_steps = _steps(attach, "jobs.attach-release-assets")
@@ -413,7 +477,17 @@ def validate_release(document: Mapping[str, Any]) -> None:
     if len(pypi_steps) != 1:
         raise ValueError("release must contain exactly one PyPI publication mutation")
     executable_runs = [_without_comments(str(step.get("run", ""))) for step in all_steps]
-    mutations = sum(len(re.findall(r"\bgh\s+release\s+upload\b", run)) for run in executable_runs)
+    mutations = sum(
+        len(re.findall(r"\bgh\s+release\s+upload\b", run))
+        + len(
+            re.findall(
+                r"\bgh\s+api\s+--method\s+POST\s+[^\n]*"
+                r"/releases/\$CURRENT_RELEASE_ID/assets\?name=",
+                run,
+            )
+        )
+        for run in executable_runs
+    )
     if mutations != 1:
         raise ValueError("release must contain exactly one GitHub Release upload mutation")
     if any("--clobber" in run for run in executable_runs):
@@ -437,7 +511,7 @@ def validate_release(document: Mapping[str, Any]) -> None:
         inputs = _mapping(consumer.get("with"), f"{label} download inputs")
         expected_inputs = {
             "artifact-ids": BUILD_ARTIFACT_ID,
-            "path": "dist" if label == "PyPI" else "release-assets",
+            "path": "release-bundle" if label == "PyPI" else "release-assets",
             "merge-multiple": True,
         }
         if inputs != expected_inputs:
@@ -445,7 +519,7 @@ def validate_release(document: Mapping[str, Any]) -> None:
 
     pypi_inputs = _mapping(pypi_steps[0].get("with"), "PyPI inputs")
     if pypi_inputs != {
-        "packages-dir": "dist",
+        "packages-dir": "pypi-dist",
         "verbose": True,
         "print-hash": True,
     }:
@@ -498,7 +572,9 @@ def validate_release(document: Mapping[str, Any]) -> None:
     )
 
     attach_run = _run(attach_steps[1], "GitHub asset mutation")
-    upload_index = attach_run.index("gh release upload")
+    if "gh release upload" in attach_run:
+        raise ValueError("GitHub Release mutation must target the frozen exact Release ID")
+    upload_index = attach_run.index("releases/$CURRENT_RELEASE_ID/assets?name=")
     if attach_run.rfind("CURRENT_RELEASE_ID=$(jq", 0, upload_index) < attach_run.index("done"):
         raise ValueError("GitHub Release identity must be recaptured immediately before mutation")
 

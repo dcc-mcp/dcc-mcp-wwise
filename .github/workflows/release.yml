@@ -188,7 +188,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
-          path: dist
+          path: release-bundle
           merge-multiple: true
       - name: Verify immutable identity immediately before PyPI
         env:
@@ -211,8 +211,8 @@ jobs:
           test -n "$ARTIFACT_ID"
           [[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum dist/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
-          (cd dist && sha256sum --check SHA256SUMS)
+          test "$(sha256sum release-bundle/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
+          (cd release-bundle && sha256sum --check SHA256SUMS)
           TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')
           CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
           CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
@@ -226,14 +226,19 @@ jobs:
           test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
           test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
           test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
-          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find release-bundle -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find release-bundle -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find release-bundle -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
+          test "$(find release-bundle -maxdepth 1 -type f | wc -l)" -eq 3
+          mkdir pypi-dist
+          cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/
+          test "$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          packages-dir: dist
+          packages-dir: pypi-dist
           verbose: true
           print-hash: true
 
@@ -302,15 +307,19 @@ jobs:
               exit 1
             fi
           done
-          CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
-          CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
-          RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
-          CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
-          test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
-          test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
-          test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
-          test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
-          test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
-          gh release upload "$TAG_NAME" release-assets/* --repo "$GITHUB_REPOSITORY"
+          for asset in release-assets/*; do
+            name=$(basename "$asset")
+            CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
+            CURRENT_RELEASE_ID=$(jq -r '.id' <<< "$CURRENT_RELEASE_JSON")
+            RELEASE_TARGET=$(jq -r '.target_commitish' <<< "$CURRENT_RELEASE_JSON")
+            CURRENT_RELEASE_DRAFT=$(jq -r '.draft' <<< "$CURRENT_RELEASE_JSON")
+            CURRENT_RELEASE_PRERELEASE=$(jq -r '.prerelease' <<< "$CURRENT_RELEASE_JSON")
+            CURRENT_RELEASE_IMMUTABLE=$(jq -r '.immutable // false' <<< "$CURRENT_RELEASE_JSON")
+            test "$CURRENT_RELEASE_ID" = "$VERIFIED_RELEASE_ID"
+            test "$RELEASE_TARGET" = "$VERIFIED_SOURCE_SHA"
+            test "$CURRENT_RELEASE_DRAFT" = "$VERIFIED_RELEASE_DRAFT"
+            test "$CURRENT_RELEASE_PRERELEASE" = "$VERIFIED_RELEASE_PRERELEASE"
+            test "$CURRENT_RELEASE_IMMUTABLE" = "$VERIFIED_RELEASE_IMMUTABLE"
+            ENCODED_NAME=$(jq -rn --arg value "$name" '$value | @uri')
+            gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
+          done
