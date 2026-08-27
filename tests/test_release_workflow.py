@@ -32,6 +32,33 @@ def _lock_sync_document():
     )
 
 
+def _recovery_document():
+    return _release_document()
+
+
+def test_recovery_contract_rejects_any_extra_publication_mutation() -> None:
+    from scripts.ci.check_workflows import validate_recovery
+
+    document = _recovery_document()
+    validate_recovery(document)
+    document["jobs"]["recovery-attach-release-assets"]["steps"][-1]["run"] += (
+        '\ngh release upload "$TAG_NAME" release-assets/*\n'
+    )
+
+    with pytest.raises(ValueError, match="closed recovery mutation surface"):
+        validate_recovery(document)
+
+
+def test_recovery_source_is_immutably_frozen_after_review() -> None:
+    from scripts.ci.check_workflows import validate_recovery_source
+
+    source = (ROOT / ".github/workflows/release.yml").read_bytes()
+    validate_recovery_source(source)
+
+    with pytest.raises(ValueError, match="exact reviewed source digest"):
+        validate_recovery_source(source + b"\n# decoy\n")
+
+
 def test_release_contract_ignores_comment_decoys_but_rejects_real_clobber() -> None:
     from scripts.ci.check_workflows import validate_release
 
@@ -85,7 +112,7 @@ def test_release_contract_freezes_release_please_inputs() -> None:
 
 
 def test_release_contract_freezes_checkout_inputs_and_every_run_body() -> None:
-    from scripts.ci.check_workflows import validate_release
+    from scripts.ci.check_workflows import validate_recovery, validate_release
 
     document = _release_document()
     checkout = document["jobs"]["build"]["steps"][0]
@@ -102,13 +129,21 @@ def test_release_contract_freezes_checkout_inputs_and_every_run_body() -> None:
         if "run" in step
     ]
     assert run_steps
+    normal_jobs = {
+        "release-please",
+        "verify-release-source",
+        "build",
+        "publish",
+        "attach-release-assets",
+    }
     for job_name, index in run_steps:
         document = _release_document()
         document["jobs"][job_name]["steps"][index]["run"] += (
             '\ngit push "https://github.com/other/repository.git" HEAD:main\n'
         )
-        with pytest.raises(ValueError, match="closed mutation surface"):
-            validate_release(document)
+        validator = validate_release if job_name in normal_jobs else validate_recovery
+        with pytest.raises(ValueError, match="closed (recovery )?mutation surface"):
+            validator(document)
 
     document = _release_document()
     document["jobs"]["build"]["steps"][4]["env"] = {"WRITE_TOKEN": "${{ secrets.WRITE_TOKEN }}"}
@@ -240,8 +275,8 @@ def test_release_rejects_warning_only_server_artifact_digest(job_name: str) -> N
     document = _release_document()
     identity = document["jobs"][job_name]["steps"][1]
     identity["run"] = identity["run"].replace(
-        'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"',
-        'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST" '
+        'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
+        'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256" '
         '|| echo "::warning::server digest mismatch"',
     )
 

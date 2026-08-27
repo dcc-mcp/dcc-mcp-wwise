@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+RECOVERY_WORKFLOW_SHA256 = "84519773ac8f1bbadfbec4ee2917923bc5c683e257f2b0dd697f37734f577074"
 RELEASE_SOURCE_LINES = (
     "set -euo pipefail",
     'git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"',
@@ -90,14 +92,27 @@ ARTIFACT_RECAPTURE_LINES = (
     "CURRENT_ARTIFACT_DIGEST=$(jq -r '.digest' <<< \"$CURRENT_ARTIFACT_JSON\")",
     "CURRENT_ARTIFACT_EXPIRED=$(jq -r '.expired' <<< \"$CURRENT_ARTIFACT_JSON\")",
     'test "$CURRENT_ARTIFACT_ID" = "$ARTIFACT_ID"',
-    'test "$CURRENT_ARTIFACT_DIGEST" = "$ARTIFACT_DIGEST"',
+    'CURRENT_ARTIFACT_SHA256=$(canonical_artifact_sha256 "$CURRENT_ARTIFACT_DIGEST")',
+    'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
     'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
+)
+ARTIFACT_DIGEST_NORMALIZER_LINES = (
+    "canonical_artifact_sha256() {",
+    'if [[ "$1" =~ ^([0-9a-f]{64})$ ]]; then',
+    "printf '%s\\n' \"${BASH_REMATCH[1]}\"",
+    'elif [[ "$1" =~ ^sha256:([0-9a-f]{64})$ ]]; then',
+    "printf '%s\\n' \"${BASH_REMATCH[1]}\"",
+    "else",
+    "return 1",
+    "fi",
+    "}",
 )
 PYPI_IDENTITY_LINES = (
     "set -euo pipefail",
+    *ARTIFACT_DIGEST_NORMALIZER_LINES,
     'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test -n "$ARTIFACT_ID"',
-    '[[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+    'ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")',
     '[[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
     'test "$(sha256sum release-bundle/SHA256SUMS | awk \'{print $1}\')" = "$MANIFEST_DIGEST"',
     "(cd release-bundle && sha256sum --check SHA256SUMS)",
@@ -127,9 +142,10 @@ PYPI_IDENTITY_LINES = (
 )
 ATTACH_IDENTITY_LINES = (
     "set -euo pipefail",
+    *ARTIFACT_DIGEST_NORMALIZER_LINES,
     'test "$BUILD_SOURCE_SHA" = "$VERIFIED_SOURCE_SHA"',
     'test -n "$ARTIFACT_ID"',
-    '[[ "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]',
+    'ARTIFACT_SHA256=$(canonical_artifact_sha256 "$ARTIFACT_DIGEST")',
     '[[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]',
     'test "$(sha256sum release-assets/SHA256SUMS | awk \'{print $1}\')" = "$MANIFEST_DIGEST"',
     "(cd release-assets && sha256sum --check SHA256SUMS)",
@@ -333,7 +349,63 @@ def validate_release(document: Mapping[str, Any]) -> None:
     workflow_surface = {key: value for key, value in document.items() if key != "jobs"}
     if workflow_surface != {
         "name": "Release",
-        "on": {"push": {"branches": ["main"]}, "workflow_dispatch": None},
+        "on": {
+            "push": {"branches": ["main"]},
+            "workflow_dispatch": {
+                "inputs": {
+                    "tag": {"required": True, "type": "string", "default": "v0.1.3"},
+                    "source_sha": {
+                        "required": True,
+                        "type": "string",
+                        "default": "d921113c14ec1c270897b70d553d1261d7a20fa1",
+                    },
+                    "release_id": {
+                        "required": True,
+                        "type": "string",
+                        "default": "377552005",
+                    },
+                    "original_run_id": {
+                        "required": True,
+                        "type": "string",
+                        "default": "33037251075",
+                    },
+                    "original_artifact_id": {
+                        "required": True,
+                        "type": "string",
+                        "default": "9632474230",
+                    },
+                    "original_artifact_digest": {
+                        "required": True,
+                        "type": "string",
+                        "default": (
+                            "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c"
+                        ),
+                    },
+                    "manifest_digest": {
+                        "required": True,
+                        "type": "string",
+                        "default": (
+                            "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815"
+                        ),
+                    },
+                    "release_draft": {
+                        "required": True,
+                        "type": "string",
+                        "default": "false",
+                    },
+                    "release_prerelease": {
+                        "required": True,
+                        "type": "string",
+                        "default": "false",
+                    },
+                    "release_immutable": {
+                        "required": True,
+                        "type": "string",
+                        "default": "false",
+                    },
+                }
+            },
+        },
         "concurrency": {
             "group": "${{ github.workflow }}-${{ github.ref }}",
             "cancel-in-progress": False,
@@ -350,6 +422,9 @@ def validate_release(document: Mapping[str, Any]) -> None:
         "build",
         "publish",
         "attach-release-assets",
+        "recovery-build",
+        "recovery-publish",
+        "recovery-attach-release-assets",
     }
     if set(jobs) != required_jobs:
         raise ValueError("release workflow must expose only the reviewed release jobs")
@@ -416,7 +491,7 @@ def validate_release(document: Mapping[str, Any]) -> None:
 
     expected_job_surfaces: Mapping[str, Mapping[str, Any]] = {
         "release-please": {
-            "if": "github.ref == 'refs/heads/main'",
+            "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
             "runs-on": "ubuntu-latest",
             "timeout-minutes": 10,
             "permissions": {"contents": "write", "pull-requests": "write"},
@@ -571,7 +646,13 @@ def validate_release(document: Mapping[str, Any]) -> None:
 
     publish_steps = _steps(publish, "jobs.publish")
     attach_steps = _steps(attach, "jobs.attach-release-assets")
-    all_steps = _all_steps(document)
+    all_steps = [
+        *release_please_steps,
+        *verify_steps,
+        *build_steps,
+        *publish_steps,
+        *attach_steps,
+    ]
     pypi_steps = [step for step in all_steps if step.get("uses") == PYPI_PUBLISH]
     if len(pypi_steps) != 1:
         raise ValueError("release must contain exactly one PyPI publication mutation")
@@ -715,6 +796,231 @@ def validate_release(document: Mapping[str, Any]) -> None:
         "for asset in release-assets/*; do", 0, upload_index
     ):
         raise ValueError("GitHub Release tag must be recaptured immediately before each mutation")
+
+
+def validate_recovery(document: Mapping[str, Any]) -> None:
+    expected_inputs = {
+        "tag": {"required": True, "type": "string", "default": "v0.1.3"},
+        "source_sha": {
+            "required": True,
+            "type": "string",
+            "default": "d921113c14ec1c270897b70d553d1261d7a20fa1",
+        },
+        "release_id": {"required": True, "type": "string", "default": "377552005"},
+        "original_run_id": {
+            "required": True,
+            "type": "string",
+            "default": "33037251075",
+        },
+        "original_artifact_id": {
+            "required": True,
+            "type": "string",
+            "default": "9632474230",
+        },
+        "original_artifact_digest": {
+            "required": True,
+            "type": "string",
+            "default": "9e28fd0352291399a8499dea12680b2b0b7c56d869e9e1756bdf72a96ca9806c",
+        },
+        "manifest_digest": {
+            "required": True,
+            "type": "string",
+            "default": "ea7523274c061555fc09f22a2a5a05525e8263779dd4affb01af8c98f5856815",
+        },
+        "release_draft": {"required": True, "type": "string", "default": "false"},
+        "release_prerelease": {
+            "required": True,
+            "type": "string",
+            "default": "false",
+        },
+        "release_immutable": {
+            "required": True,
+            "type": "string",
+            "default": "false",
+        },
+    }
+    triggers = _mapping(document.get("on"), "recovery triggers")
+    dispatch = _mapping(triggers.get("workflow_dispatch"), "recovery dispatch")
+    if dispatch != {"inputs": expected_inputs}:
+        raise ValueError("recovery must keep its exact reviewed workflow dispatch surface")
+    _require_pinned_actions(document, "recovery")
+    _require_timeouts(document, "recovery")
+    if "secrets." in repr(document):
+        raise ValueError("recovery must not use long-lived credentials")
+
+    build = _job(document, "recovery-build")
+    publish = _job(document, "recovery-publish")
+    attach = _job(document, "recovery-attach-release-assets")
+    expected_outputs = {
+        "source_sha": "${{ steps.source.outputs.source_sha }}",
+        "release_id": "${{ steps.source.outputs.release_id }}",
+        "release_draft": "${{ steps.source.outputs.release_draft }}",
+        "release_prerelease": "${{ steps.source.outputs.release_prerelease }}",
+        "release_immutable": "${{ steps.source.outputs.release_immutable }}",
+        "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
+        "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
+        "manifest_digest": "${{ steps.hashes.outputs.manifest_digest }}",
+    }
+    expected_job_surfaces = {
+        "recovery-build": {
+            "if": "github.event_name == 'workflow_dispatch'",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 15,
+            "permissions": {"actions": "read", "contents": "read"},
+            "outputs": expected_outputs,
+        },
+        "recovery-publish": {
+            "needs": "recovery-build",
+            "if": "github.event_name == 'workflow_dispatch'",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "environment": {
+                "name": "pypi",
+                "url": "https://pypi.org/p/dcc-mcp-wwise",
+            },
+            "permissions": {"actions": "read", "contents": "read", "id-token": "write"},
+        },
+        "recovery-attach-release-assets": {
+            "needs": ["recovery-build", "recovery-publish"],
+            "if": (
+                "github.event_name == 'workflow_dispatch' && "
+                "needs.recovery-publish.result == 'success'"
+            ),
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 10,
+            "permissions": {"actions": "read", "contents": "write"},
+        },
+    }
+    for name, expected in expected_job_surfaces.items():
+        job = _job(document, name)
+        actual = {key: value for key, value in job.items() if key != "steps"}
+        if actual != expected:
+            raise ValueError(f"recovery {name} must keep its exact reviewed job mapping")
+
+    build_steps = _steps(build, "recovery build")
+    publish_steps = _steps(publish, "recovery publish")
+    attach_steps = _steps(attach, "recovery assets")
+    if [step.get("name") for step in build_steps] != [
+        None,
+        None,
+        "Bind the recovery build to the frozen incident",
+        "Install build validation dependencies",
+        "Build wheel and sdist from the immutable tag",
+        "Validate recovery distributions",
+        "Create recovery distribution hash manifest",
+        "Upload immutable recovery distributions",
+    ]:
+        raise ValueError("recovery build must keep its reviewed ordered steps")
+    if [step.get("name") for step in publish_steps] != [
+        "Download immutable recovery distributions",
+        "Verify recovery identity immediately before PyPI",
+        "Publish recovery distributions with Trusted Publishing",
+    ]:
+        raise ValueError("recovery PyPI must keep its reviewed ordered steps")
+    if [step.get("name") for step in attach_steps] != [
+        "Download immutable recovery distributions",
+        "Verify recovery identity and attach exact assets idempotently",
+    ]:
+        raise ValueError("recovery assets must keep its reviewed ordered steps")
+
+    if build_steps[0].get("with") != {
+        "ref": "${{ inputs.tag }}",
+        "fetch-depth": 0,
+        "persist-credentials": False,
+    } or build_steps[1].get("with") != {"python-version": "3.13"}:
+        raise ValueError("recovery must build only the credential-free immutable tag checkout")
+    source = build_steps[2]
+    source_run = _run(source, "recovery incident binding")
+    for required in (
+        'test "$TAG_NAME" = "v0.1.3"',
+        'test "$EXPECTED_SOURCE_SHA" = "d921113c14ec1c270897b70d553d1261d7a20fa1"',
+        'test "$EXPECTED_RELEASE_ID" = "377552005"',
+        'test "$ORIGINAL_RUN_ID" = "33037251075"',
+        'test "$ORIGINAL_ARTIFACT_ID" = "9632474230"',
+        'test "$RUN_CONCLUSION" = "failure"',
+    ):
+        if source_run.count(required) != 1:
+            raise ValueError("recovery must bind every exact incident input and live identity")
+    upload = build_steps[-1]
+    if (
+        upload.get("uses") != UPLOAD_ARTIFACT
+        or upload.get("id") != "upload"
+        or upload.get("with")
+        != {
+            "name": "recovery-python-dist-v0.1.3-${{ github.run_id }}",
+            "path": "dist/*.whl\ndist/*.tar.gz\ndist/SHA256SUMS\n",
+            "if-no-files-found": "error",
+            "compression-level": 0,
+            "retention-days": 7,
+        }
+    ):
+        raise ValueError("recovery artifact must keep its exact reviewed upload surface")
+
+    expected_downloads = (
+        (publish_steps[0], "release-bundle"),
+        (attach_steps[0], "release-assets"),
+    )
+    for step, path in expected_downloads:
+        if step.get("uses") != DOWNLOAD_ARTIFACT or step.get("with") != {
+            "artifact-ids": "${{ needs.recovery-build.outputs.artifact_id }}",
+            "path": path,
+            "merge-multiple": True,
+        }:
+            raise ValueError("recovery publishers must download only the new exact artifact ID")
+    publisher = publish_steps[-1]
+    if publisher != {
+        "name": "Publish recovery distributions with Trusted Publishing",
+        "if": "steps.identity.outputs.publish_required == 'true'",
+        "uses": PYPI_PUBLISH,
+        "with": {"packages-dir": "pypi-dist", "verbose": True, "print-hash": True},
+    }:
+        raise ValueError("recovery PyPI mutation must keep its exact Trusted Publisher surface")
+
+    publish_run = _run(publish_steps[1], "recovery PyPI identity")
+    attach_run = _run(attach_steps[1], "recovery GitHub assets")
+    recovery_steps = [*build_steps, *publish_steps, *attach_steps]
+    all_runs = "\n".join(_without_comments(str(step.get("run", ""))) for step in recovery_steps)
+    if (
+        "gh release upload" in all_runs
+        or "--clobber" in all_runs
+        or re.search(r"\bgit\s+(push|tag|commit)\b", all_runs)
+    ):
+        raise ValueError("recovery must keep the reviewed closed recovery mutation surface")
+    if all_runs.count("gh api --method POST") != 1:
+        raise ValueError("recovery must keep the reviewed closed recovery mutation surface")
+    if any(token in all_runs for token in ("gh api --method DELETE", "gh api --method PATCH")):
+        raise ValueError("recovery must keep the reviewed closed recovery mutation surface")
+    for run, label in ((publish_run, "PyPI"), (attach_run, "GitHub assets")):
+        for required in (
+            "canonical_artifact_sha256()",
+            "CURRENT_ARTIFACT_JSON=$(gh api",
+            'test "$CURRENT_ARTIFACT_SHA256" = "$ARTIFACT_SHA256"',
+            'test "$CURRENT_ARTIFACT_EXPIRED" = "false"',
+            'test "$ARTIFACT_RUN_ID" = "$EXPECTED_RUN_ID"',
+            "CURRENT_RELEASE_JSON=$(gh api",
+            "TAG_SHA=$(gh api",
+            "sha256sum --check",
+        ):
+            if required not in run:
+                raise ValueError(f"recovery {label} must recapture exact live identity")
+    if "https://pypi.org/pypi/dcc-mcp-wwise/0.1.3/json" not in publish_run:
+        raise ValueError("recovery PyPI must verify an existing version idempotently")
+    post_index = attach_run.index("gh api --method POST")
+    loop_index = attach_run.rfind("for asset in release-assets/*; do", 0, post_index)
+    if loop_index < 0 or any(
+        attach_run.rfind(marker, loop_index, post_index) < 0
+        for marker in (
+            "CURRENT_ARTIFACT_JSON=$(gh api",
+            "CURRENT_RELEASE_JSON=$(gh api",
+            "TAG_SHA=$(gh api",
+        )
+    ):
+        raise ValueError("recovery must recapture artifact, release, and tag before every mutation")
+
+
+def validate_recovery_source(source: bytes) -> None:
+    if hashlib.sha256(source).hexdigest() != RECOVERY_WORKFLOW_SHA256:
+        raise ValueError("recovery workflow must keep its exact reviewed source digest")
 
 
 def validate_ci(document: Mapping[str, Any]) -> None:
@@ -933,7 +1239,10 @@ def _load(relative: str) -> Mapping[str, Any]:
 
 
 def validate_all() -> None:
-    validate_release(_load(".github/workflows/release.yml"))
+    release = _load(".github/workflows/release.yml")
+    validate_release(release)
+    validate_recovery_source((ROOT / ".github/workflows/release.yml").read_bytes())
+    validate_recovery(release)
     validate_ci(_load(".github/workflows/ci.yml"))
     validate_lock_sync(_load(".github/workflows/release-please-lock-sync.yml"))
     validate_version_consistency(_load(".github/workflows/version-consistency.yml"))
