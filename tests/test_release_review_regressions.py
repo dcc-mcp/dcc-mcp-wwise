@@ -24,6 +24,22 @@ def _load(path: Path):
     return yaml_loads(path.read_text(encoding="utf-8"))
 
 
+def _eligible_recovery_jobs(workflow: dict, *, event_name: str, ref: str) -> list[str]:
+    context = {
+        "github.event_name == 'workflow_dispatch'": event_name == "workflow_dispatch",
+        "github.ref == 'refs/heads/main'": ref == "refs/heads/main",
+        "needs.recovery-publish.result == 'success'": True,
+    }
+    eligible: list[str] = []
+    for job_name in ("recovery-build", "recovery-publish", "recovery-attach-release-assets"):
+        clauses = [clause.strip() for clause in workflow["jobs"][job_name]["if"].split("&&")]
+        if not set(clauses) <= set(context):
+            raise AssertionError(f"unmodeled recovery condition: {clauses}")
+        if all(context[clause] for clause in clauses):
+            eligible.append(job_name)
+    return eligible
+
+
 def _run_workflow_guard(run: str, expected: str, environment: dict[str, str]) -> int:
     command = next(
         (line.strip() for line in run.splitlines() if line.strip() == expected),
@@ -112,10 +128,12 @@ def test_recovery_dispatch_is_frozen_to_the_v013_incident_and_rebuilds_the_tag()
         workflow["jobs"]
     )
     build = workflow["jobs"]["recovery-build"]
-    assert build["if"] == "github.event_name == 'workflow_dispatch'"
-    assert workflow["jobs"]["recovery-publish"]["if"] == "github.event_name == 'workflow_dispatch'"
+    dispatch_main = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+    assert build["if"] == dispatch_main
+    assert workflow["jobs"]["recovery-publish"]["if"] == dispatch_main
     assert workflow["jobs"]["recovery-attach-release-assets"]["if"] == (
-        "github.event_name == 'workflow_dispatch' && needs.recovery-publish.result == 'success'"
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && "
+        "needs.recovery-publish.result == 'success'"
     )
     checkout = next(
         step
@@ -134,6 +152,52 @@ def test_recovery_dispatch_is_frozen_to_the_v013_incident_and_rebuilds_the_tag()
         "artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
         "manifest_digest": "${{ steps.select.outputs.manifest_digest }}",
     }
+
+
+def test_non_main_recovery_dispatch_has_zero_executable_or_oidc_jobs() -> None:
+    workflow = _load(RECOVERY_WORKFLOW)
+    branch_jobs = _eligible_recovery_jobs(
+        workflow,
+        event_name="workflow_dispatch",
+        ref="refs/heads/unreviewed-recovery",
+    )
+    assert branch_jobs == []
+    assert not any(
+        workflow["jobs"][job_name].get("permissions", {}).get("id-token") == "write"
+        for job_name in branch_jobs
+    )
+
+    assert _eligible_recovery_jobs(
+        workflow,
+        event_name="workflow_dispatch",
+        ref="refs/heads/main",
+    ) == ["recovery-build", "recovery-publish", "recovery-attach-release-assets"]
+
+    branch_surfaces = [
+        step
+        for job_name in branch_jobs
+        for step in workflow["jobs"][job_name]["steps"]
+        if "pypi-publish" in str(step.get("uses", ""))
+        or "upload-artifact" in str(step.get("uses", ""))
+        or "uploads.github.com" in str(step.get("run", ""))
+    ]
+    assert branch_surfaces == []
+
+
+@pytest.mark.parametrize(
+    "job_name",
+    ["recovery-build", "recovery-publish", "recovery-attach-release-assets"],
+)
+def test_workflow_contract_rejects_recovery_job_without_main_ref_gate(job_name: str) -> None:
+    from scripts.ci.check_workflows import validate_recovery
+
+    workflow = _load(RECOVERY_WORKFLOW)
+    condition = workflow["jobs"][job_name]["if"]
+    condition = condition.replace(" && github.ref == 'refs/heads/main'", "")
+    condition = condition.replace("github.ref == 'refs/heads/main' && ", "")
+    workflow["jobs"][job_name]["if"] = condition
+    with pytest.raises(ValueError):
+        validate_recovery(workflow)
 
 
 def test_recovery_build_fails_closed_on_incident_or_live_identity_drift() -> None:
@@ -284,7 +348,8 @@ def test_recovery_assets_are_idempotent_and_recap_every_identity_before_post() -
     attach = workflow["jobs"]["recovery-attach-release-assets"]
     assert attach["needs"] == ["recovery-build", "recovery-publish"]
     assert attach["if"] == (
-        "github.event_name == 'workflow_dispatch' && needs.recovery-publish.result == 'success'"
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && "
+        "needs.recovery-publish.result == 'success'"
     )
     assert attach["permissions"] == {"actions": "read", "contents": "write"}
     preflight = next(
