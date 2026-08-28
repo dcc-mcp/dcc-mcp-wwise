@@ -518,7 +518,7 @@ def test_recovery_pypi_is_bound_to_the_new_artifact_and_idempotent_exact_files()
         "python scripts/ci/release_integrity.py artifact selected-artifact.json",
         "(cd release-bundle && sha256sum --check SHA256SUMS)",
         "python tools/verify_release_archives.py release-bundle/*.whl",
-        "--snapshot-dir pypi-dist",
+        "--snapshot-dir pypi-staging",
         "https://pypi.org/pypi/dcc-mcp-wwise/0.1.4/json",
         'python scripts/ci/release_integrity.py pypi "$PYPI_JSON" pypi-dist',
         'echo "publish_required=false" >> "$GITHUB_OUTPUT"',
@@ -663,7 +663,7 @@ def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
         for step in publish["steps"]
         if step.get("name") == "Verify immutable identity immediately before PyPI"
     )
-    assert "--snapshot-dir pypi-dist" in identity_run
+    assert "--snapshot-dir pypi-staging" in identity_run
     packages.mkdir()
     for pattern in ("*.whl", "*.tar.gz"):
         for distribution in bundle.glob(pattern):
@@ -687,11 +687,11 @@ def test_every_publication_consumes_only_a_verified_private_snapshot() -> None:
     assert "cp dist/" not in recovery_build_runs
 
     expected = {
-        "publish": ("pypi-dist", "release-bundle/SHA256SUMS"),
-        "recovery-publish": ("pypi-dist", "release-bundle/SHA256SUMS"),
-        "attach-release-assets": ("verified-assets", "verified-assets/SHA256SUMS"),
+        "publish": ("pypi-staging", "release-bundle/SHA256SUMS"),
+        "recovery-publish": ("pypi-staging", "release-bundle/SHA256SUMS"),
+        "attach-release-assets": ("verified-assets-staging", "verified-assets/SHA256SUMS"),
         "recovery-attach-release-assets": (
-            "verified-assets",
+            "verified-assets-staging",
             "verified-assets/SHA256SUMS",
         ),
     }
@@ -700,6 +700,29 @@ def test_every_publication_consumes_only_a_verified_private_snapshot() -> None:
         assert f"--snapshot-dir {snapshot}" in runs
         assert f"cp release-bundle/*.whl release-bundle/*.tar.gz {snapshot}/" not in runs
         assert manifest in runs
+
+
+def test_publication_consumers_use_object_bound_handoffs() -> None:
+    workflow = _load(RELEASE_WORKFLOW)
+    for job_name in ("publish", "recovery-publish"):
+        job = workflow["jobs"][job_name]
+        runs = "\n".join(str(step.get("run", "")) for step in job["steps"])
+        publication = next(
+            step for step in job["steps"] if step.get("uses", "").startswith("pypa/")
+        )
+        assert "--snapshot-dir pypi-staging" in runs
+        assert "--readonly-bind-dir pypi-dist" in runs
+        assert publication["with"]["packages-dir"] == "pypi-dist"
+
+    for job_name in ("attach-release-assets", "recovery-attach-release-assets"):
+        runs = "\n".join(str(step.get("run", "")) for step in workflow["jobs"][job_name]["steps"])
+        assert "--snapshot-dir verified-assets-staging" in runs
+        assert "--readonly-bind-dir verified-assets" in runs
+        assert "--manifest release-assets/SHA256SUMS" in runs
+        assert 'exec {asset_fd}<"$asset"' in runs
+        assert 'asset_handle="/proc/self/fd/$asset_fd"' in runs
+        assert '--input "$asset_handle"' in runs
+        assert '--input "$asset"' not in runs
 
 
 def test_downloaded_release_artifacts_are_hash_verified_fail_closed_before_publish() -> None:
@@ -808,5 +831,5 @@ def test_release_identity_freezes_id_and_state_and_recaptures_before_mutations()
     )
     assert "gh release upload" not in attach_run
     upload = attach_run.index("releases/$CURRENT_RELEASE_ID/assets?name=")
-    assert '--input "$asset"' in attach_run[upload:]
+    assert '--input "$asset_handle"' in attach_run[upload:]
     assert attach_run.rfind("CURRENT_RELEASE_JSON=$(gh api", 0, upload) > attach_run.index("done")
