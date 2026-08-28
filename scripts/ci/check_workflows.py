@@ -21,10 +21,10 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
-RECOVERY_WORKFLOW_SHA256 = "0c3b61e1edbc16955a672a395ac6730075029389d98179d49faedf4daf1e3cde"
-RELEASE_SEMANTIC_SHA256 = "1e830e1bf7bd10b95216668027f0cb512564587a3ddbc1d3318a5d48540fe7c9"
+RECOVERY_WORKFLOW_SHA256 = "eb5f2c7a7b215a0203b95e451c99048321a9a7cc2f5a38da0bbbdfc18c5a55b9"
+RELEASE_SEMANTIC_SHA256 = "89994b616e039ee00c75c962a48be30de6751c8a475209ced4ef66a47f9d928a"
 RELEASE_INTEGRITY_SHA256 = "c8b15f136aa59ed7473a67cd4af389c2c105ffe3c38894a4c397e41950a0a59e"
-ARCHIVE_VALIDATOR_SHA256 = "b5b2df55d165049e9c0cdb3df864ccf1cb48f9137037c2956917dc1d93e9ef5a"
+ARCHIVE_VALIDATOR_SHA256 = "f2fb6074406767f0775040b4fadbe49d08f46e713d6df4be324b15a09ab3079c"
 RECOVERY_SOURCE_RUN = "\n".join(
     (
         "set -euo pipefail",
@@ -486,7 +486,7 @@ def validate_recovery_bootstrap(document: Mapping[str, Any]) -> None:
                 'python -m twine check "$GITHUB_WORKSPACE"/dist/*\n'
                 'python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl '
                 '"$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" '
-                "dcc-mcp-wwise 0.1.4\n"
+                "dcc-mcp-wwise 0.1.4 --snapshot-dir selected-dist\n"
             ),
         },
     ]

@@ -518,7 +518,7 @@ def test_recovery_pypi_is_bound_to_the_new_artifact_and_idempotent_exact_files()
         "python scripts/ci/release_integrity.py artifact selected-artifact.json",
         "(cd release-bundle && sha256sum --check SHA256SUMS)",
         "python tools/verify_release_archives.py release-bundle/*.whl",
-        "cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/",
+        "--snapshot-dir pypi-dist",
         "https://pypi.org/pypi/dcc-mcp-wwise/0.1.4/json",
         'python scripts/ci/release_integrity.py pypi "$PYPI_JSON" pypi-dist',
         'echo "publish_required=false" >> "$GITHUB_OUTPUT"',
@@ -579,7 +579,7 @@ def test_recovery_assets_are_idempotent_and_recap_every_identity_before_post() -
         'releases/${{ inputs.release_id }}/assets?name=$ENCODED_NAME"'
     )
     assert run.count(upload) == 1
-    loop = run.rsplit("for asset in release-assets/*; do", 1)[-1]
+    loop = run.rsplit("for asset in verified-assets/*; do", 1)[-1]
     for required in (
         "ASSET_MATCH_COUNT=$(jq",
         'EXISTING_ASSET_ID=$(jq -r --arg name "$name"',
@@ -605,7 +605,7 @@ def test_asset_publication_stops_on_a_mid_loop_tag_move() -> None:
         for step in workflow["jobs"]["attach-release-assets"]["steps"]
         if step.get("name") == "Verify identity and attach assets without clobbering"
     )
-    asset_loop = attach_run.rsplit("for asset in release-assets/*; do", 1)[-1]
+    asset_loop = attach_run.rsplit("for asset in verified-assets/*; do", 1)[-1]
     guard = 'test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"'
     verified = "a" * 40
     uploads: list[str] = []
@@ -663,7 +663,7 @@ def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
         for step in publish["steps"]
         if step.get("name") == "Verify immutable identity immediately before PyPI"
     )
-    assert "cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/" in identity_run
+    assert "--snapshot-dir pypi-dist" in identity_run
     packages.mkdir()
     for pattern in ("*.whl", "*.tar.gz"):
         for distribution in bundle.glob(pattern):
@@ -672,7 +672,34 @@ def test_pypi_action_glob_contains_only_distributions(tmp_path: Path) -> None:
     assert action_equivalent_glob
     assert all(path.endswith((".whl", ".tar.gz")) for path in action_equivalent_glob)
     assert download["with"]["path"] != publication["with"]["packages-dir"]
-    assert "dist/SHA256SUMS" in workflow["jobs"]["build"]["steps"][-2]["with"]["path"]
+    assert "verified-dist/SHA256SUMS" in workflow["jobs"]["build"]["steps"][-2]["with"]["path"]
+
+
+def test_every_publication_consumes_only_a_verified_private_snapshot() -> None:
+    workflow = _load(RELEASE_WORKFLOW)
+    build_runs = "\n".join(str(step.get("run", "")) for step in workflow["jobs"]["build"]["steps"])
+    recovery_build_runs = "\n".join(
+        str(step.get("run", "")) for step in workflow["jobs"]["recovery-build"]["steps"]
+    )
+    assert "--snapshot-dir verified-dist" in build_runs
+    assert "cp dist/" not in build_runs
+    assert "--snapshot-dir selected-dist" in recovery_build_runs
+    assert "cp dist/" not in recovery_build_runs
+
+    expected = {
+        "publish": ("pypi-dist", "release-bundle/SHA256SUMS"),
+        "recovery-publish": ("pypi-dist", "release-bundle/SHA256SUMS"),
+        "attach-release-assets": ("verified-assets", "verified-assets/SHA256SUMS"),
+        "recovery-attach-release-assets": (
+            "verified-assets",
+            "verified-assets/SHA256SUMS",
+        ),
+    }
+    for job_name, (snapshot, manifest) in expected.items():
+        runs = "\n".join(str(step.get("run", "")) for step in workflow["jobs"][job_name]["steps"])
+        assert f"--snapshot-dir {snapshot}" in runs
+        assert f"cp release-bundle/*.whl release-bundle/*.tar.gz {snapshot}/" not in runs
+        assert manifest in runs
 
 
 def test_downloaded_release_artifacts_are_hash_verified_fail_closed_before_publish() -> None:
