@@ -175,7 +175,7 @@ def test_recovery_build_uses_one_canonical_tag_source_root() -> None:
             'python -m twine check "$GITHUB_WORKSPACE"/dist/*\n'
             'python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl '
             '"$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" '
-            "dcc-mcp-wwise 0.1.4\n"
+            "dcc-mcp-wwise 0.1.4 --snapshot-dir selected-dist\n"
         ),
     }
 
@@ -602,7 +602,7 @@ def test_release_rejects_missing_per_asset_tag_recapture() -> None:
     attach = _named_step(
         document, "attach-release-assets", "Verify identity and attach assets without clobbering"
     )
-    loop_start = attach["run"].rfind("for asset in release-assets/*; do")
+    loop_start = attach["run"].rfind("for asset in verified-assets/*; do")
     prefix = attach["run"][:loop_start]
     loop = attach["run"][loop_start:]
     loop = loop.replace(

@@ -157,7 +157,7 @@ jobs:
           set -euo pipefail
           python -m twine check dist/*
           python tools/verify_wheel.py dist/*.whl
-          python tools/verify_release_archives.py dist/*.whl dist/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto
+          python tools/verify_release_archives.py dist/*.whl dist/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto --snapshot-dir verified-dist
           test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
@@ -166,8 +166,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
-          MANIFEST_DIGEST=$(sha256sum dist/SHA256SUMS | awk '{print $1}')
+          (cd verified-dist && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
+          MANIFEST_DIGEST=$(sha256sum verified-dist/SHA256SUMS | awk '{print $1}')
           [[ "$MANIFEST_DIGEST" =~ ^[0-9a-f]{64}$ ]]
           echo "manifest_digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
       - name: Upload immutable Python distributions
@@ -176,9 +176,9 @@ jobs:
         with:
           name: python-dist-${{ needs.release-please.outputs.tag_name }}-${{ github.run_id }}
           path: |
-            dist/*.whl
-            dist/*.tar.gz
-            dist/SHA256SUMS
+            verified-dist/*.whl
+            verified-dist/*.tar.gz
+            verified-dist/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -270,14 +270,13 @@ jobs:
           test "$(find release-bundle -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find release-bundle -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
           test "$(find release-bundle -maxdepth 1 -type f | wc -l)" -eq 3
-          mkdir pypi-dist
-          cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/
+          python tools/verify_release_archives.py release-bundle/*.whl release-bundle/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto --snapshot-dir pypi-dist
           test "$(find pypi-dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find pypi-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find pypi-dist -maxdepth 1 -type f | wc -l)" -eq 2
-          python tools/verify_release_archives.py release-bundle/*.whl release-bundle/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
           python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
+          (cd pypi-dist && sha256sum --check ../release-bundle/SHA256SUMS)
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
@@ -360,9 +359,11 @@ jobs:
           test "$(find release-assets -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
-          python tools/verify_release_archives.py release-assets/*.whl release-assets/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto
+          python tools/verify_release_archives.py release-assets/*.whl release-assets/*.tar.gz src/dcc_mcp_wwise dcc-mcp-wwise auto --snapshot-dir verified-assets
+          (cd verified-assets && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
+          test "$(sha256sum verified-assets/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           EXISTING=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?per_page=100" --jq '.[].name')
-          for asset in release-assets/*; do
+          for asset in verified-assets/*; do
             name=$(basename "$asset")
             if grep -Fqx "$name" <<< "$EXISTING"; then
               echo "::error::existing release asset refuses no-clobber publication: $name"
@@ -371,7 +372,7 @@ jobs:
           done
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
           python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
-          for asset in release-assets/*; do
+          for asset in verified-assets/*; do
             name=$(basename "$asset")
             CURRENT_RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME")
             printf "%s" "$CURRENT_RELEASE_JSON" > release.json
@@ -380,6 +381,11 @@ jobs:
             test "$TAG_SHA" = "$VERIFIED_SOURCE_SHA"
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
             python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
+            if test "$name" = "SHA256SUMS"; then
+              test "$(sha256sum "$asset" | awk '{print $1}')" = "$MANIFEST_DIGEST"
+            else
+              (cd verified-assets && sha256sum --check --ignore-missing SHA256SUMS)
+            fi
             ENCODED_NAME=$(jq -rn --arg value "$name" '$value | @uri')
             gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$CURRENT_RELEASE_ID/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
           done
@@ -454,15 +460,13 @@ jobs:
           TAG_SOURCE_ROOT: ${{ steps.source.outputs.tag_source_root }}
         run: |
           python -m twine check "$GITHUB_WORKSPACE"/dist/*
-          python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl "$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" dcc-mcp-wwise 0.1.4
+          python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl "$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" dcc-mcp-wwise 0.1.4 --snapshot-dir selected-dist
       - name: Freeze the rebuilt v0.1.4 distributions
         id: select
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
-          mkdir selected-dist
-          cp dist/* selected-dist/
+          (cd selected-dist && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
           test "$(find selected-dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find selected-dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(find selected-dist -maxdepth 1 -type f -name 'SHA256SUMS' | wc -l)" -eq 1
@@ -559,9 +563,7 @@ jobs:
           test "$(sha256sum release-bundle/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           (cd release-bundle && sha256sum --check SHA256SUMS)
           test "$(find release-bundle -maxdepth 1 -type f | wc -l)" -eq 3
-          python tools/verify_release_archives.py release-bundle/*.whl release-bundle/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.4
-          mkdir pypi-dist
-          cp release-bundle/*.whl release-bundle/*.tar.gz pypi-dist/
+          python tools/verify_release_archives.py release-bundle/*.whl release-bundle/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.4 --snapshot-dir pypi-dist
           gh api "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}" > release.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ inputs.original_run_id }}" > incident.json
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > selected-artifact.json
@@ -569,6 +571,7 @@ jobs:
           python scripts/ci/release_integrity.py incident incident.json
           python scripts/ci/release_integrity.py artifact selected-artifact.json --id "$ARTIFACT_ID" --name "recovery-python-dist-v0.1.4-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$GITHUB_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
+          (cd pypi-dist && sha256sum --check ../release-bundle/SHA256SUMS)
           PYPI_JSON=$(mktemp)
           PYPI_STATUS=$(curl --silent --show-error --location --output "$PYPI_JSON" --write-out '%{http_code}' https://pypi.org/pypi/dcc-mcp-wwise/0.1.4/json)
           if test "$PYPI_STATUS" = "404"; then
@@ -579,6 +582,7 @@ jobs:
           else
             exit 1
           fi
+          (cd pypi-dist && sha256sum --check ../release-bundle/SHA256SUMS)
       - name: Publish recovery distributions with Trusted Publishing
         if: steps.identity.outputs.publish_required == 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
@@ -628,8 +632,10 @@ jobs:
           test "$(sha256sum release-assets/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
           (cd release-assets && sha256sum --check SHA256SUMS)
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
-          python tools/verify_release_archives.py release-assets/*.whl release-assets/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.4
-          for asset in release-assets/*; do
+          python tools/verify_release_archives.py release-assets/*.whl release-assets/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.4 --snapshot-dir verified-assets
+          (cd verified-assets && sha256sum --binary *.whl *.tar.gz > SHA256SUMS)
+          test "$(sha256sum verified-assets/SHA256SUMS | awk '{print $1}')" = "$MANIFEST_DIGEST"
+          for asset in verified-assets/*; do
             name=$(basename "$asset")
             LOCAL_SHA256=$(sha256sum "$asset" | awk '{print $1}')
             ASSETS_JSON=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}/assets?per_page=100")
@@ -650,6 +656,11 @@ jobs:
             python scripts/ci/release_integrity.py artifact selected-artifact.json --id "$ARTIFACT_ID" --name "recovery-python-dist-v0.1.4-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$REPOSITORY_ID" --head-sha "$GITHUB_SHA"
             ASSETS_JSON=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}/assets?per_page=100")
             test "$(jq --arg name "$name" '[.[][] | select(.name == $name)] | length' <<< "$ASSETS_JSON")" -eq 0
+            if test "$name" = "SHA256SUMS"; then
+              test "$(sha256sum "$asset" | awk '{print $1}')" = "$MANIFEST_DIGEST"
+            else
+              (cd verified-assets && sha256sum --check --ignore-missing SHA256SUMS)
+            fi
             ENCODED_NAME=$(jq -rn --arg value "$name" '$value | @uri')
             gh api --method POST "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/${{ inputs.release_id }}/assets?name=$ENCODED_NAME" --header "Content-Type: application/octet-stream" --input "$asset"
           done
