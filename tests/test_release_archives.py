@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -120,10 +122,13 @@ def test_release_archive_verifier_installs_source_wheel_and_sdist(
     assert len(environments) == 3
     assert all("--system-site-packages" not in command for command in environments)
     installs = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
-    installed_paths = [Path(command[-1]) for command in installs]
-    assert [path.name for path in installed_paths] == ["source", wheel.name, sdist.name]
-    assert all(path.is_absolute() for path in installed_paths)
-    assert installed_paths != [ROOT, wheel, sdist]
+    installed_urls = [urllib.parse.urlparse(command[-1]) for command in installs]
+    assert [Path(url.path).name for url in installed_urls] == [
+        "dcc-mcp-wwise-0.1.4-source.zip",
+        wheel.name,
+        sdist.name,
+    ]
+    assert all(url.scheme == "http" and url.hostname == "127.0.0.1" for url in installed_urls)
     assert all("--no-deps" not in command for command in installs)
 
 
@@ -150,10 +155,13 @@ def test_release_archive_verifier_binds_install_inputs_before_cwd_drift(
     )
 
     installs = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
-    installed_paths = [Path(command[-1]) for command in installs]
-    assert [path.name for path in installed_paths] == ["source", wheel.name, sdist.name]
-    assert all(path.is_absolute() for path in installed_paths)
-    assert installed_paths != [ROOT.resolve(), wheel.resolve(), sdist.resolve()]
+    installed_urls = [urllib.parse.urlparse(command[-1]) for command in installs]
+    assert [Path(url.path).name for url in installed_urls] == [
+        "dcc-mcp-wwise-0.1.4-source.zip",
+        wheel.name,
+        sdist.name,
+    ]
+    assert all(url.scheme == "http" and url.hostname == "127.0.0.1" for url in installed_urls)
 
 
 @pytest.mark.parametrize("replaced", ["source", "wheel", "sdist"])
@@ -194,17 +202,18 @@ def test_release_archive_transaction_installs_the_bytes_it_validated(
 
     consumed: list[tuple[str, bytes]] = []
 
-    def capture_install(distribution: Path, *, version: str) -> None:
+    def capture_install(payload: bytes, filename: str, *, version: str) -> None:
         del version
-        if distribution.is_dir():
-            consumed.append(("source", (distribution / "src/dcc_mcp_wwise/waapi.py").read_bytes()))
-        elif distribution.name.endswith(".whl"):
-            consumed.append(("wheel", distribution.read_bytes()))
+        if filename.endswith("-source.zip"):
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                consumed.append(("source", archive.read("source/src/dcc_mcp_wwise/waapi.py")))
+        elif filename.endswith(".whl"):
+            consumed.append(("wheel", payload))
         else:
-            consumed.append(("sdist", distribution.read_bytes()))
+            consumed.append(("sdist", payload))
 
     monkeypatch.setattr(release_archives, "_smoke", replace_after_validation)
-    monkeypatch.setattr(release_archives, "_installed_smoke", capture_install)
+    monkeypatch.setattr(release_archives, "_installed_smoke_bytes", capture_install)
 
     verify_pair(wheel, sdist, source, "dcc-mcp-wwise", "auto")
 
@@ -238,7 +247,7 @@ def test_release_archive_transaction_exports_only_the_bytes_it_validated(
             replacement.replace(wheel)
 
     monkeypatch.setattr(release_archives, "_smoke", replace_after_validation)
-    monkeypatch.setattr(release_archives, "_installed_smoke", lambda *args, **kwargs: None)
+    monkeypatch.setattr(release_archives, "_installed_smoke_bytes", lambda *args, **kwargs: None)
     publication = tmp_path / "publication"
 
     verify_pair(
@@ -310,6 +319,174 @@ def test_release_archive_transaction_rejects_package_root_movement_during_captur
 
     with pytest.raises(ValueError, match="source package identity changed"):
         verify_pair(wheel, sdist, source, "dcc-mcp-wwise", "auto")
+
+
+def test_install_smoke_consumes_bound_wheel_bytes_not_a_replaced_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    built_distributions: tuple[Path, Path],
+) -> None:
+    built_wheel, built_sdist = built_distributions
+    wheel = tmp_path / built_wheel.name
+    sdist = tmp_path / built_sdist.name
+    shutil.copy2(built_wheel, wheel)
+    shutil.copy2(built_sdist, sdist)
+    expected = wheel.read_bytes()
+    consumed: list[bytes] = []
+
+    def consume(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if command[1:4] != ["-m", "pip", "install"]:
+            return subprocess.CompletedProcess(command, 0)
+        target = command[-1]
+        if not target.endswith(".whl"):
+            return subprocess.CompletedProcess(command, 0)
+        if target.startswith("http://127.0.0.1:"):
+            consumed.append(urllib.request.urlopen(target, timeout=5).read())
+        else:
+            path = Path(target)
+            path.replace(path.with_name(path.name + ".captured"))
+            path.write_bytes(b"foreign-contender-consumed-by-install")
+            consumed.append(path.read_bytes())
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(release_archives.subprocess, "run", consume)
+    verify_pair(
+        wheel,
+        sdist,
+        ROOT / "src" / "dcc_mcp_wwise",
+        "dcc-mcp-wwise",
+        "auto",
+    )
+
+    assert consumed == [expected]
+
+
+def test_snapshot_export_rejects_parent_identity_replacement_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    built_distributions: tuple[Path, Path],
+) -> None:
+    wheel, sdist = built_distributions
+    publication_root = tmp_path / "publication-root"
+    publication_root.mkdir()
+    moved_root = tmp_path / "publication-root-captured"
+    export = publication_root / "verified-dist"
+    directory_identity = release_archives._directory_identity
+    swapped = False
+
+    def replace_parent(path: Path, *, label: str) -> tuple[int, int, int, int]:
+        nonlocal swapped
+        identity = directory_identity(path, label=label)
+        if label == "snapshot directory parent" and not swapped:
+            swapped = True
+            publication_root.rename(moved_root)
+            publication_root.mkdir()
+        return identity
+
+    monkeypatch.setattr(release_archives, "_directory_identity", replace_parent)
+    monkeypatch.setattr(release_archives, "_installed_smoke_bytes", lambda *args, **kwargs: None)
+
+    with pytest.raises(ValueError, match="identity changed|cannot be resolved"):
+        verify_pair(
+            wheel,
+            sdist,
+            ROOT / "src" / "dcc_mcp_wwise",
+            "dcc-mcp-wwise",
+            "auto",
+            snapshot_dir=export,
+        )
+    assert not (publication_root / "verified-dist").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="snapshot root identity uses POSIX descriptors")
+def test_snapshot_export_rejects_root_replacement_during_descriptor_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    owned_snapshot = tmp_path / "owned-snapshot"
+    original_write = release_archives._write_descriptor
+    replaced = False
+
+    def replace_root(descriptor: int, data: bytes) -> None:
+        nonlocal replaced
+        original_write(descriptor, data)
+        if not replaced:
+            replaced = True
+            snapshot.rename(owned_snapshot)
+            snapshot.mkdir()
+
+    monkeypatch.setattr(release_archives, "_write_descriptor", replace_root)
+
+    with pytest.raises(ValueError, match="snapshot directory identity changed"):
+        release_archives._write_export_snapshot(
+            snapshot,
+            {"distribution.whl": b"validated", "distribution.tar.gz": b"validated"},
+        )
+    assert list(snapshot.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="publication bind handoff requires POSIX descriptors")
+def test_publication_handoff_mounts_the_validated_directory_object(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "staging"
+    expected = {"distribution.whl": b"validated-distribution"}
+    consumed: list[bytes] = []
+
+    def consume_descriptor(
+        source_descriptor: int,
+        target: Path,
+        files: dict[str, bytes],
+    ) -> None:
+        del target
+        consumed.append(
+            Path(f"/proc/{os.getpid()}/fd/{source_descriptor}/distribution.whl").read_bytes()
+        )
+        assert files == expected
+
+    monkeypatch.setattr(release_archives, "_mount_readonly_snapshot", consume_descriptor)
+    release_archives._write_export_snapshot(
+        snapshot,
+        expected,
+        readonly_bind_dir=tmp_path / "publication",
+    )
+
+    assert consumed == [expected["distribution.whl"]]
+    assert (snapshot / "distribution.whl").read_bytes() == expected["distribution.whl"]
+
+
+def test_trusted_manifest_must_name_the_exact_validated_archive_bytes(tmp_path: Path) -> None:
+    wheel = b"validated-wheel"
+    sdist = b"validated-sdist"
+    manifest = tmp_path / "SHA256SUMS"
+    expected = (
+        f"{release_archives.hashlib.sha256(wheel).hexdigest()} *adapter.whl\n"
+        f"{release_archives.hashlib.sha256(sdist).hexdigest()} *adapter.tar.gz\n"
+    ).encode("ascii")
+    manifest.write_bytes(expected)
+
+    assert (
+        release_archives._trusted_manifest(
+            manifest,
+            "adapter.whl",
+            wheel,
+            "adapter.tar.gz",
+            sdist,
+        )
+        == expected
+    )
+
+    manifest.write_bytes(b"0" + expected[1:])
+    with pytest.raises(ValueError, match="differs from the validated archives"):
+        release_archives._trusted_manifest(
+            manifest,
+            "adapter.whl",
+            wheel,
+            "adapter.tar.gz",
+            sdist,
+        )
 
 
 def test_release_archive_transaction_refuses_an_existing_publication_directory(
