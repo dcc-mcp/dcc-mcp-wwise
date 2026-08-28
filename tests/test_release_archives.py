@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -80,6 +81,80 @@ def test_release_archive_verifier_installs_source_wheel_and_sdist(
     installs = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
     assert [Path(command[-1]) for command in installs] == [ROOT, wheel, sdist]
     assert all("--no-deps" not in command for command in installs)
+
+
+def test_release_archive_verifier_binds_install_inputs_before_cwd_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    built_distributions: tuple[Path, Path],
+) -> None:
+    wheel, sdist = built_distributions
+    invocation_root = ROOT.parent
+    commands: list[list[str]] = []
+
+    def record(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.chdir(invocation_root)
+    monkeypatch.setattr(release_archives.subprocess, "run", record)
+    verify_pair(
+        wheel,
+        sdist,
+        Path(os.path.relpath(ROOT / "src" / "dcc_mcp_wwise", invocation_root)),
+        "dcc-mcp-wwise",
+        "auto",
+    )
+
+    installs = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert [Path(command[-1]) for command in installs] == [
+        ROOT.resolve(),
+        wheel.resolve(),
+        sdist.resolve(),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_exit"),
+    [(1, "1"), (10**1000, "unknown")],
+)
+def test_installed_smoke_reports_bounded_redacted_pip_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    returncode: int,
+    expected_exit: str,
+) -> None:
+    distribution = tmp_path / "tag-source"
+    distribution.mkdir()
+    secret = "credential=do-not-print"
+    sensitive_path = str(tmp_path / "private" / "source")
+
+    def fail_install(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if command[1:4] == ["-m", "pip", "install"]:
+            raise subprocess.CalledProcessError(
+                returncode,
+                command,
+                output=f"download URL contains {secret}",
+                stderr=(
+                    "ERROR: Could not find a version that satisfies the requirement "
+                    f"tag-source from {sensitive_path}\n"
+                    "ERROR: No matching distribution found for tag-source"
+                ),
+            )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(release_archives.subprocess, "run", fail_install)
+
+    with pytest.raises(RuntimeError) as failure:
+        release_archives._installed_smoke(distribution, version="0.1.4")
+
+    message = str(failure.value)
+    assert message == (
+        "installed smoke pip install failed "
+        f"(exit={expected_exit}; reason=no-matching-distribution)"
+    )
+    assert secret not in message
+    assert sensitive_path not in message
+    assert len(message) < 120
 
 
 def test_wheel_semantic_digest_ignores_container_recompression(
