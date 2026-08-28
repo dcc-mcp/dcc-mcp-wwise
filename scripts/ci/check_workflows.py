@@ -21,10 +21,10 @@ SETUP_PYTHON = "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97"
 UPLOAD_ARTIFACT = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
-RECOVERY_WORKFLOW_SHA256 = "3a03cde86f9a5a0c7c45cac1256c57e722f4f8046e22d31f14d405cc73d4b796"
-RELEASE_SEMANTIC_SHA256 = "05f28ad065e772af1b10036bbdd4e2509f7bc6144b3b6d3ad7d159f841d508ad"
+RECOVERY_WORKFLOW_SHA256 = "0c3b61e1edbc16955a672a395ac6730075029389d98179d49faedf4daf1e3cde"
+RELEASE_SEMANTIC_SHA256 = "1e830e1bf7bd10b95216668027f0cb512564587a3ddbc1d3318a5d48540fe7c9"
 RELEASE_INTEGRITY_SHA256 = "c8b15f136aa59ed7473a67cd4af389c2c105ffe3c38894a4c397e41950a0a59e"
-ARCHIVE_VALIDATOR_SHA256 = "31b77b7fad89a8813e25d78bbcfa303853509d852db03320335707c002da9433"
+ARCHIVE_VALIDATOR_SHA256 = "b5b2df55d165049e9c0cdb3df864ccf1cb48f9137037c2956917dc1d93e9ef5a"
 RECOVERY_SOURCE_RUN = "\n".join(
     (
         "set -euo pipefail",
@@ -33,7 +33,10 @@ RECOVERY_SOURCE_RUN = "\n".join(
         'test "$RELEASE_ID" = "378005400"',
         'test "$RELEASE_NODE_ID" = "RE_kwDOTnYlVs4Wh-eY"',
         'test "$ORIGINAL_RUN_ID" = "33098798286"',
-        'test "$(git -C tag-source rev-parse HEAD)" = "$SOURCE_SHA"',
+        "test ! -L tag-source",
+        "TAG_SOURCE_ROOT=$(realpath tag-source)",
+        'test "$TAG_SOURCE_ROOT" = "$GITHUB_WORKSPACE/tag-source"',
+        'test "$(git -C "$TAG_SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_SHA"',
         (
             'test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" '
             '--jq \'.object.sha\')" = "$SOURCE_SHA"'
@@ -43,6 +46,7 @@ RECOVERY_SOURCE_RUN = "\n".join(
         "python scripts/ci/release_integrity.py release release.json",
         "python scripts/ci/release_integrity.py incident incident.json",
         'echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"',
+        'echo "tag_source_root=$TAG_SOURCE_ROOT" >> "$GITHUB_OUTPUT"',
         "",
     )
 )
@@ -462,6 +466,35 @@ def validate_recovery_bootstrap(document: Mapping[str, Any]) -> None:
         raise ValueError(
             "closed recovery mutation surface: recovery-build must install the exact "
             "pinned recovery helper dependency immediately before its first Python helper"
+        )
+    root = "${{ steps.source.outputs.tag_source_root }}"
+    canonical_steps = [
+        {
+            "name": "Install build validation dependencies",
+            "env": {"TAG_SOURCE_ROOT": root},
+            "run": 'python -m pip install -e "$TAG_SOURCE_ROOT[dev]"',
+        },
+        {
+            "name": "Build wheel and sdist from the immutable tag",
+            "env": {"TAG_SOURCE_ROOT": root},
+            "run": 'python -m build "$TAG_SOURCE_ROOT" --outdir "$GITHUB_WORKSPACE/dist"',
+        },
+        {
+            "name": "Validate tag-built distributions",
+            "env": {"TAG_SOURCE_ROOT": root},
+            "run": (
+                'python -m twine check "$GITHUB_WORKSPACE"/dist/*\n'
+                'python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl '
+                '"$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" '
+                "dcc-mcp-wwise 0.1.4\n"
+            ),
+        },
+    ]
+    source_index = source_indices[0]
+    if steps[source_index + 1 : source_index + 4] != canonical_steps:
+        raise ValueError(
+            "closed recovery mutation surface: recovery-build must use the one canonical "
+            "tag source root for dependency install, build, and archive verification"
         )
 
 

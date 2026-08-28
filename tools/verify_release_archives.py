@@ -18,6 +18,13 @@ from typing import Mapping
 from packaging.utils import canonicalize_name
 
 
+def _canonical_existing(path: Path, *, label: str) -> Path:
+    try:
+        return path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError(f"{label} is missing or cannot be resolved canonically") from None
+
+
 def semantic_digest(path: Path) -> str:
     members: dict[str, bytes] = {}
     if path.name.endswith(".whl"):
@@ -183,7 +190,27 @@ def _smoke(files: Mapping[str, bytes], *, version: str) -> None:
         )
 
 
+def _pip_failure_reason(error: subprocess.CalledProcessError) -> str:
+    diagnostic = "\n".join(
+        value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        for value in (error.stdout, error.stderr)
+        if isinstance(value, (str, bytes))
+    ).lower()
+    if "no matching distribution found" in diagnostic:
+        return "no-matching-distribution"
+    if "could not find a version that satisfies the requirement" in diagnostic:
+        return "dependency-resolution"
+    if "invalid requirement" in diagnostic:
+        return "invalid-requirement"
+    if "does not appear to be a python project" in diagnostic:
+        return "invalid-python-project"
+    if "no such file or directory" in diagnostic or "the system cannot find" in diagnostic:
+        return "input-not-found"
+    return "unclassified"
+
+
 def _installed_smoke(distribution: Path, *, version: str) -> None:
+    distribution = _canonical_existing(distribution, label="installed smoke input")
     with tempfile.TemporaryDirectory() as temporary:
         environment_root = Path(temporary) / "venv"
         subprocess.run(
@@ -192,19 +219,30 @@ def _installed_smoke(distribution: Path, *, version: str) -> None:
             capture_output=True,
         )
         python = environment_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        subprocess.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-input",
-                str(distribution),
-            ],
-            check=True,
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    str(distribution),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as error:
+            exit_code = (
+                error.returncode
+                if type(error.returncode) is int and 0 <= error.returncode <= 0xFFFFFFFF
+                else "unknown"
+            )
+            reason = _pip_failure_reason(error)
+            raise RuntimeError(
+                f"installed smoke pip install failed (exit={exit_code}; reason={reason})"
+            ) from None
         subprocess.run(
             [
                 str(python),
@@ -225,6 +263,9 @@ def verify_pair(
     wheel_semantic_sha256: str | None = None,
     sdist_semantic_sha256: str | None = None,
 ) -> None:
+    wheel = _canonical_existing(wheel, label="wheel")
+    sdist = _canonical_existing(sdist, label="sdist")
+    source = _canonical_existing(source, label="reviewed source package")
     if version == "auto":
         version = _source_version(source)
     expected = _source_files(source)

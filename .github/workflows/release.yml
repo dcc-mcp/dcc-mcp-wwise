@@ -430,21 +430,31 @@ jobs:
           test "$RELEASE_ID" = "378005400"
           test "$RELEASE_NODE_ID" = "RE_kwDOTnYlVs4Wh-eY"
           test "$ORIGINAL_RUN_ID" = "33098798286"
-          test "$(git -C tag-source rev-parse HEAD)" = "$SOURCE_SHA"
+          test ! -L tag-source
+          TAG_SOURCE_ROOT=$(realpath tag-source)
+          test "$TAG_SOURCE_ROOT" = "$GITHUB_WORKSPACE/tag-source"
+          test "$(git -C "$TAG_SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG_NAME" --jq '.object.sha')" = "$SOURCE_SHA"
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ORIGINAL_RUN_ID" > incident.json
           python scripts/ci/release_integrity.py release release.json
           python scripts/ci/release_integrity.py incident incident.json
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag_source_root=$TAG_SOURCE_ROOT" >> "$GITHUB_OUTPUT"
       - name: Install build validation dependencies
-        run: python -m pip install -e "./tag-source[dev]"
+        env:
+          TAG_SOURCE_ROOT: ${{ steps.source.outputs.tag_source_root }}
+        run: python -m pip install -e "$TAG_SOURCE_ROOT[dev]"
       - name: Build wheel and sdist from the immutable tag
-        run: python -m build tag-source --outdir dist
+        env:
+          TAG_SOURCE_ROOT: ${{ steps.source.outputs.tag_source_root }}
+        run: python -m build "$TAG_SOURCE_ROOT" --outdir "$GITHUB_WORKSPACE/dist"
       - name: Validate tag-built distributions
+        env:
+          TAG_SOURCE_ROOT: ${{ steps.source.outputs.tag_source_root }}
         run: |
-          python -m twine check dist/*
-          python tools/verify_release_archives.py dist/*.whl dist/*.tar.gz tag-source/src/dcc_mcp_wwise dcc-mcp-wwise 0.1.4
+          python -m twine check "$GITHUB_WORKSPACE"/dist/*
+          python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl "$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" dcc-mcp-wwise 0.1.4
       - name: Freeze the rebuilt v0.1.4 distributions
         id: select
         shell: bash

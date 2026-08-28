@@ -142,6 +142,79 @@ def test_recovery_source_helper_failure_cannot_continue() -> None:
         validate_recovery_bootstrap(document)
 
 
+def test_recovery_build_uses_one_canonical_tag_source_root() -> None:
+    document = _recovery_document()
+    source = _named_step(
+        document,
+        "recovery-build",
+        "Bind the recovery to the frozen v0.1.4 incident",
+    )
+    install = _named_step(document, "recovery-build", "Install build validation dependencies")
+    build = _named_step(document, "recovery-build", "Build wheel and sdist from the immutable tag")
+    validate = _named_step(document, "recovery-build", "Validate tag-built distributions")
+    root = "${{ steps.source.outputs.tag_source_root }}"
+
+    assert "TAG_SOURCE_ROOT=$(realpath tag-source)" in source["run"]
+    assert 'test "$TAG_SOURCE_ROOT" = "$GITHUB_WORKSPACE/tag-source"' in source["run"]
+    assert "test ! -L tag-source" in source["run"]
+    assert 'echo "tag_source_root=$TAG_SOURCE_ROOT" >> "$GITHUB_OUTPUT"' in source["run"]
+    assert install == {
+        "name": "Install build validation dependencies",
+        "env": {"TAG_SOURCE_ROOT": root},
+        "run": 'python -m pip install -e "$TAG_SOURCE_ROOT[dev]"',
+    }
+    assert build == {
+        "name": "Build wheel and sdist from the immutable tag",
+        "env": {"TAG_SOURCE_ROOT": root},
+        "run": 'python -m build "$TAG_SOURCE_ROOT" --outdir "$GITHUB_WORKSPACE/dist"',
+    }
+    assert validate == {
+        "name": "Validate tag-built distributions",
+        "env": {"TAG_SOURCE_ROOT": root},
+        "run": (
+            'python -m twine check "$GITHUB_WORKSPACE"/dist/*\n'
+            'python tools/verify_release_archives.py "$GITHUB_WORKSPACE"/dist/*.whl '
+            '"$GITHUB_WORKSPACE"/dist/*.tar.gz "$TAG_SOURCE_ROOT/src/dcc_mcp_wwise" '
+            "dcc-mcp-wwise 0.1.4\n"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("step_name", "field", "replacement"),
+    [
+        (
+            "Install build validation dependencies",
+            "run",
+            'python -m pip install -e "./tag-source[dev]"',
+        ),
+        (
+            "Build wheel and sdist from the immutable tag",
+            "env",
+            {"TAG_SOURCE_ROOT": "tag-source"},
+        ),
+        (
+            "Validate tag-built distributions",
+            "run",
+            "python -m twine check dist/*\n",
+        ),
+    ],
+)
+def test_recovery_contract_rejects_canonical_tag_source_root_drift(
+    step_name: str,
+    field: str,
+    replacement: object,
+) -> None:
+    from scripts.ci.check_workflows import validate_recovery_bootstrap
+
+    document = _recovery_document()
+    validate_recovery_bootstrap(document)
+    _named_step(document, "recovery-build", step_name)[field] = replacement
+
+    with pytest.raises(ValueError, match="canonical tag source root"):
+        validate_recovery_bootstrap(document)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
