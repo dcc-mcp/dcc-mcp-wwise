@@ -186,7 +186,7 @@ def _host_pid_command(verb: str) -> list[str]:
         "wwise_pids=($(pgrep -x Wwise || true)); "
         "if [ ${#wwise_pids[@]} -eq 0 ]; then "
         "echo 'No Wwise Authoring process found' >&2; exit 10; fi; "
-        "if [ ${#wwise_pids[@]} -gt 1 ]; then printf '%s\\n' \"${wwise_pids[@]}\"; "
+        "if [ ${#wwise_pids[@]} -gt 1 ]; then printf '%%s\\n' \"${wwise_pids[@]}\"; "
         'read -r wwise_pid; else wwise_pid="${wwise_pids[0]}"; fi; '
         'exec dcc-mcp-wwise %s --json --host-pid "$wwise_pid"' % verb
     )

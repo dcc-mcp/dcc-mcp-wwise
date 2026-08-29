@@ -181,6 +181,16 @@ def test_missing_host_pid_emits_executable_pid_discovery_command(monkeypatch, ca
     assert any("Count -gt 1" in part or "-gt 1" in part for part in command)
 
 
+def test_posix_pid_discovery_command_is_formatted_without_percent_errors(monkeypatch):
+    from dcc_mcp_wwise import doctor
+
+    monkeypatch.setattr(doctor.os, "name", "posix")
+    command = doctor._host_pid_command("verify")
+    assert command[:2] == ["sh", "-lc"]
+    assert "printf '%s\\n'" in command[2]
+    assert "read -r wwise_pid" in command[2]
+
+
 def test_unknown_failure_type_is_normalized_to_closed_enum(monkeypatch, capsys):
     from dcc_mcp_wwise import cli, process_identity
 
