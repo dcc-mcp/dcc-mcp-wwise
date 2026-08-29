@@ -11,6 +11,7 @@ def _fake_doctor_host_boundaries(monkeypatch):
 
     identity = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
     monkeypatch.setattr(process_identity, "observe_wwise_process", lambda _pid: identity)
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.8.1")
 
     def in_process_get_info(url=None, *, timeout_secs=5.0):
         assert timeout_secs > 0
@@ -46,6 +47,60 @@ def test_install_contract_is_owned_by_formal_core_02014() -> None:
     assert not (
         Path(__file__).parents[1] / "src" / "dcc_mcp_wwise" / "install_contract.py"
     ).exists()
+
+
+def test_report_exposes_host_sdk_and_tool_floor_checks(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor, waapi
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+    code = cli.main(["verify", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert report["checks"]["host"] == {
+        "success": True,
+        "pid": 4321,
+        "executable": "Wwise.exe",
+        "started_at": "start-1",
+    }
+    assert report["checks"]["sdk"]["success"] is True
+    assert report["checks"]["sdk"]["minimum_version"] == doctor.MIN_WAAPI_CLIENT_VERSION
+    assert report["checks"]["tool"]["success"] is True
+    assert report["checks"]["tool"]["python_minimum"] == doctor.MIN_PYTHON_VERSION
+
+
+def test_report_fails_preflight_when_waapi_sdk_is_below_floor(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor
+
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.7.0")
+    code = cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_stage"] == "sdk"
+    assert report["checks"]["sdk"]["success"] is False
+    assert report["checks"]["sdk"]["version"] == "0.7.0"
+
+
+def test_report_fails_preflight_when_waapi_sdk_is_outside_supported_major(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor
+
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.9.0")
+    code = cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_stage"] == "sdk"
+    assert report["checks"]["sdk"]["success"] is False
+    assert report["checks"]["sdk"]["maximum_version_exclusive"] == "0.9"
 
 
 def test_public_report_validates_with_the_packaged_core_schema() -> None:
