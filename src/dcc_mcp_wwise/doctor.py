@@ -53,6 +53,20 @@ _FAILURE_TYPES = {
     "deadline": "timeout",
     "host_identity": "identity_unavailable",
 }
+_STABLE_FAILURE_TYPES = frozenset(
+    {
+        *(_FAILURE_TYPES.values()),
+        "invalid_timeout",
+        "invalid_result",
+        "connection_failed",
+        "rpc_failed",
+        "cleanup_failed",
+        "identity_unavailable",
+        "identity_mismatch",
+        "timeout",
+        "unknown_failure",
+    }
+)
 
 
 class _RuntimeVersionError(waapi.WaapiCallError):
@@ -153,6 +167,31 @@ def _config_checks(url: str | None = None) -> dict[str, Any]:
     }
 
 
+def _host_pid_command(verb: str) -> list[str]:
+    """Build a safe, executable command that discovers and binds one Wwise PID."""
+    if os.name == "nt":
+        script = (
+            "$wwisePid = (Get-Process -Name Wwise -ErrorAction Stop | "
+            "Select-Object -First 1 -ExpandProperty Id); "
+            "& dcc-mcp-wwise %s --json --host-pid $wwisePid" % verb
+        )
+        return ["powershell", "-NoProfile", "-Command", script]
+    script = (
+        "wwise_pid=$(pgrep -x Wwise | head -n 1) && "
+        'exec dcc-mcp-wwise %s --json --host-pid "$wwise_pid"' % verb
+    )
+    return ["sh", "-lc", script]
+
+
+def _host_pid_step(verb: str, reason: str) -> dict[str, Any]:
+    return {
+        "id": "supply-wwise-pid",
+        "description": "Discover and bind the exact local Wwise Authoring PID",
+        "command": _host_pid_command(verb),
+        "why": reason,
+    }
+
+
 def _release_tuple(value: str) -> tuple[int, int, int] | None:
     normalized = value.strip()
     if len(normalized) > _MAX_VERSION_LENGTH:
@@ -202,6 +241,10 @@ def _report(
 ) -> dict[str, Any]:
     directly_usable = exit_code == EXIT_OK
     public_failure_type = failure_type or _FAILURE_TYPES.get(failure_stage or "")
+    if directly_usable:
+        public_failure_type = None
+    elif public_failure_type not in _STABLE_FAILURE_TYPES:
+        public_failure_type = "unknown_failure"
     public_next_steps = list(next_steps or ())
     if not directly_usable and not public_next_steps:
         retry_verb = verb if verb in {"doctor", "verify"} else "doctor"
@@ -444,6 +487,7 @@ def doctor_report(
                 EXIT_PREFLIGHT,
                 "host_identity",
                 reason,
+                [_host_pid_step(verb, reason)],
                 verb=verb,
                 failure_type=exc.failure_type,
             )
@@ -614,20 +658,7 @@ def doctor_report(
             EXIT_PREFLIGHT,
             "host_identity",
             reason,
-            [
-                {
-                    "id": "supply-wwise-pid",
-                    "description": "Retry with the exact local Wwise Authoring PID",
-                    "command": [
-                        "dcc-mcp-wwise",
-                        verb,
-                        "--json",
-                        "--host-pid",
-                        "PID",
-                    ],
-                    "why": reason,
-                }
-            ],
+            [_host_pid_step(verb, reason)],
             verb=verb,
             failure_type="identity_unavailable",
         )
@@ -646,6 +677,7 @@ def doctor_report(
             EXIT_PREFLIGHT,
             "host_identity",
             reason,
+            [_host_pid_step(verb, reason)],
             verb=verb,
             failure_type=exc.failure_type,
         )

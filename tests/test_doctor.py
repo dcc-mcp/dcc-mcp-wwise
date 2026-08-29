@@ -154,6 +154,43 @@ def test_host_identity_failure_has_machine_executable_remediation(monkeypatch, c
     assert report["next_steps"][0]["command"]
 
 
+def test_missing_host_pid_emits_executable_pid_discovery_command(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+    code = cli.main(["verify", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    command = report["next_steps"][0]["command"]
+    assert code == 10
+    assert "PID" not in command
+    assert any("wwisePid" in part or "wwise_pid" in part for part in command)
+
+
+def test_unknown_failure_type_is_normalized_to_closed_enum(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity
+
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: (_ for _ in ()).throw(process_identity.ProcessIdentityError("bogus")),
+    )
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_type"] == "unknown_failure"
+
+
 def test_public_report_validates_with_the_packaged_core_schema() -> None:
     from dcc_mcp_core.deployment import load_install_sop_schema
     from jsonschema import Draft202012Validator
