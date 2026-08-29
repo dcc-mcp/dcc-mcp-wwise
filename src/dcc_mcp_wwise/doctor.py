@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from importlib import metadata
 from typing import Any
 from urllib.parse import urlparse
 
@@ -22,12 +23,16 @@ from dcc_mcp_core.deployment import (
 from dcc_mcp_core.deployment import (
     INSTALL_SOP_SCHEMA_VERSION as SCHEMA_VERSION,
 )
+from packaging.version import InvalidVersion, Version
 
 from . import process_identity, waapi
 from .__version__ import __version__
 
 MIN_CORE_VERSION = "0.20.14"
 MIN_WWISE_VERSION = "2024.1"
+MIN_WAAPI_CLIENT_VERSION = "0.8.1"
+MAX_WAAPI_CLIENT_VERSION = "0.9"
+MIN_PYTHON_VERSION = "3.10"
 _MAX_VERSION_LENGTH = 39
 _RELEASE = re.compile(r"\A([0-9]{1,9})\.([0-9]{1,9})(?:\.([0-9]{1,9})(?:\.[0-9]{1,9})?)?\Z")
 _RUNTIME_VERSION = re.compile(
@@ -35,6 +40,33 @@ _RUNTIME_VERSION = re.compile(
     r"(0|[1-9][0-9]{0,8})\."
     r"(0|[1-9][0-9]{0,8})\."
     r"(0|[1-9][0-9]{0,8})\Z"
+)
+_FAILURE_TYPES = {
+    "configuration": "configuration_failed",
+    "endpoint_allowlist": "endpoint_not_allowed",
+    "core": "core_version_unsupported",
+    "sdk": "sdk_version_unsupported",
+    "tool": "python_version_unsupported",
+    "wwise_version": "wwise_version_unsupported",
+    "waapi_enablement": "connection_failed",
+    "runtime": "rpc_failed",
+    "deadline": "timeout",
+    "host_identity": "identity_unavailable",
+}
+_STABLE_FAILURE_TYPES = frozenset(
+    {
+        *(_FAILURE_TYPES.values()),
+        "invalid_timeout",
+        "invalid_result",
+        "connection_failed",
+        "rpc_failed",
+        "cleanup_failed",
+        "identity_unavailable",
+        "identity_mismatch",
+        "timeout",
+        "missing_result",
+        "unknown_failure",
+    }
 )
 
 
@@ -63,6 +95,117 @@ def _public_waapi_reason(exc: waapi.WaapiCallError) -> str:
 def runtime_core_version() -> str:
     """Return the version exposed by the required formal Core runtime."""
     return str(_core.__version__)
+
+
+def waapi_client_version() -> str | None:
+    """Return the installed official waapi-client distribution version."""
+    try:
+        return metadata.version("waapi-client")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def _pep440_version(value: str | None) -> Version | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if len(normalized) > _MAX_VERSION_LENGTH:
+        return None
+    try:
+        return Version(normalized)
+    except InvalidVersion:
+        return None
+
+
+def _at_least(version: str | None, minimum: str) -> bool:
+    actual = _pep440_version(version)
+    expected = _pep440_version(minimum)
+    if actual is None or expected is None:
+        return False
+    return actual >= expected
+
+
+def _below(version: str | None, maximum: str) -> bool:
+    actual = _pep440_version(version)
+    expected = _pep440_version(maximum)
+    if actual is None or expected is None:
+        return False
+    return actual < expected
+
+
+def _tool_checks() -> dict[str, Any]:
+    python_version = "%d.%d.%d" % sys.version_info[:3]
+    return {
+        "success": sys.version_info[:2] >= (3, 10),
+        "python_version": python_version,
+        "python_minimum": MIN_PYTHON_VERSION,
+    }
+
+
+def _sdk_checks() -> dict[str, Any]:
+    version = waapi_client_version()
+    return {
+        "success": _at_least(version, MIN_WAAPI_CLIENT_VERSION)
+        and _below(version, MAX_WAAPI_CLIENT_VERSION),
+        "package": "waapi-client",
+        "version": version or "missing",
+        "minimum_version": MIN_WAAPI_CLIENT_VERSION,
+        "maximum_version_exclusive": MAX_WAAPI_CLIENT_VERSION,
+    }
+
+
+def _config_checks(url: str | None = None) -> dict[str, Any]:
+    allowed_hosts = sorted(
+        item.strip().lower()
+        for item in os.environ.get("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS", "").split(",")
+        if item.strip()
+    )
+    return {
+        "success": True,
+        "platform": sys.platform,
+        "waapi_url": url,
+        "allowed_hosts": allowed_hosts,
+    }
+
+
+def _host_pid_command(verb: str) -> list[str]:
+    """Build an executable command that requires unambiguous Wwise PID selection."""
+    if os.name == "nt":
+        script = (
+            "$wwise = @(Get-Process -Name Wwise -ErrorAction SilentlyContinue); "
+            "if ($wwise.Count -eq 0) { throw 'No Wwise Authoring process found' }; "
+            "if ($wwise.Count -gt 1) { $wwise | Select-Object Id,MainWindowTitle | "
+            "Format-Table | Out-Host; $wwisePid = [int](Read-Host 'Enter exact Wwise PID') } "
+            "else { $wwisePid = $wwise[0].Id }; "
+            "if (@($wwise.Id) -notcontains $wwisePid) { "
+            "throw 'Selected PID is not a Wwise process' }; "
+            "& dcc-mcp-wwise %s --json --host-pid $wwisePid" % verb
+        )
+        return ["powershell", "-NoProfile", "-Command", script]
+    script = (
+        'wwise_pids="$(pgrep -x Wwise || true)"; '
+        'wwise_count="$(printf \'%%s\\n\' "$wwise_pids" | '
+        "awk 'NF { n++ } END { print n + 0 }')\"; "
+        'if [ "$wwise_count" -eq 0 ]; then '
+        "echo 'No Wwise Authoring process found' >&2; exit 10; fi; "
+        'if [ "$wwise_count" -gt 1 ]; then printf \'%%s\\n\' "$wwise_pids"; '
+        "printf 'Enter exact Wwise PID: '; read -r wwise_pid; else wwise_pid=\"$wwise_pids\"; fi; "
+        "wwise_match=0; for candidate in $wwise_pids; do "
+        '[ "$candidate" = "$wwise_pid" ] && wwise_match=1; done; '
+        'if [ "$wwise_match" -ne 1 ]; then '
+        "echo 'Selected PID is not a Wwise process' >&2; exit 10; fi; "
+        'exec dcc-mcp-wwise %s --json --host-pid "$wwise_pid"' % verb
+    )
+    return ["sh", "-lc", script]
+
+
+def _host_pid_step(verb: str, reason: str) -> dict[str, Any]:
+    return {
+        "id": "supply-wwise-pid",
+        "description": "Discover and bind the exact local Wwise Authoring PID",
+        "command": _host_pid_command(verb),
+        "why": reason,
+    }
 
 
 def _release_tuple(value: str) -> tuple[int, int, int] | None:
@@ -113,6 +256,22 @@ def _report(
     failure_type: str | None = None,
 ) -> dict[str, Any]:
     directly_usable = exit_code == EXIT_OK
+    public_failure_type = failure_type or _FAILURE_TYPES.get(failure_stage or "")
+    if directly_usable:
+        public_failure_type = None
+    elif public_failure_type not in _STABLE_FAILURE_TYPES:
+        public_failure_type = "unknown_failure"
+    public_next_steps = list(next_steps or ())
+    if not directly_usable and not public_next_steps:
+        retry_verb = verb if verb in {"doctor", "verify"} else "doctor"
+        public_next_steps = [
+            {
+                "id": "retry-%s" % retry_verb,
+                "description": "Retry the typed Wwise %s verification" % retry_verb,
+                "command": ["dcc-mcp-wwise", retry_verb, "--json"],
+                "why": failure_reason or "The verification did not complete",
+            }
+        ]
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ok" if directly_usable else "failed",
@@ -122,13 +281,13 @@ def _report(
         "core_version": runtime_core_version(),
         "checks": checks,
         "steps": steps,
-        "next_steps": list(next_steps or ()),
+        "next_steps": public_next_steps,
         "receipt_path": None,
         "verify": {
             "directly_usable": directly_usable,
             "failure_stage": failure_stage,
             "failure_reason": failure_reason,
-            "failure_type": failure_type,
+            "failure_type": public_failure_type,
         },
         "_exit_code": exit_code,
     }
@@ -140,6 +299,14 @@ def doctor_report(
     host_pid: int | None = None,
     timeout_ms: int = 5000,
 ) -> dict[str, Any]:
+    tool_checks = _tool_checks()
+    sdk_checks = _sdk_checks()
+    base_checks: dict[str, Any] = {
+        "tool": tool_checks,
+        "sdk": sdk_checks,
+        "config": _config_checks(),
+        "host": {"success": False, "observed": False, "executable": None},
+    }
     if (
         not isinstance(timeout_ms, int)
         or isinstance(timeout_ms, bool)
@@ -147,7 +314,7 @@ def doctor_report(
     ):
         reason = "timeout_ms must be an integer from 1 through 120000"
         return _report(
-            {},
+            base_checks,
             [{"id": "validate-timeout", "status": "failed", "message": reason}],
             EXIT_PREFLIGHT,
             "configuration",
@@ -155,6 +322,35 @@ def doctor_report(
             verb=verb,
             failure_type="invalid_timeout",
         )
+    for check, stage, description in (
+        (tool_checks, "tool", "Upgrade to Python 3.10 or newer in the adapter environment"),
+        (sdk_checks, "sdk", "Install waapi-client>=0.8.1,<0.9 in the adapter environment"),
+    ):
+        if not check["success"]:
+            reason = "%s prerequisite is unsupported" % stage
+            return _report(
+                base_checks,
+                [{"id": "validate-%s" % stage, "status": "failed", "message": reason}],
+                EXIT_PREFLIGHT,
+                stage,
+                reason,
+                [
+                    {
+                        "id": "upgrade-%s" % stage,
+                        "description": description,
+                        "command": [
+                            sys.executable,
+                            "-m",
+                            "pip",
+                            "install",
+                            "--upgrade",
+                            ("dcc-mcp-wwise" if stage == "tool" else "waapi-client>=0.8.1,<0.9"),
+                        ],
+                        "why": reason,
+                    }
+                ],
+                verb=verb,
+            )
     deadline = time.monotonic() + (timeout_ms / 1000.0)
     try:
         resolved = waapi.resolve_waapi_url(url)
@@ -169,13 +365,14 @@ def doctor_report(
             port = None
         reason = str(exc)
         checks = {
+            **base_checks,
             "endpoint": {
                 "success": False,
                 "url": attempted,
                 "host": parsed.hostname,
                 "port": port,
                 "allowed": False,
-            }
+            },
         }
         return _report(
             checks,
@@ -202,13 +399,14 @@ def doctor_report(
     except ValueError as exc:
         reason = "Invalid WAAPI endpoint configuration: %s" % exc
         checks = {
+            **base_checks,
             "endpoint": {
                 "success": False,
                 "url": None,
                 "host": None,
                 "port": None,
                 "allowed": False,
-            }
+            },
         }
         return _report(
             checks,
@@ -241,7 +439,11 @@ def doctor_report(
         "port": parsed.port,
         "allowed": True,
     }
-    checks: dict[str, Any] = {"endpoint": endpoint}
+    checks: dict[str, Any] = {
+        **base_checks,
+        "config": _config_checks(resolved),
+        "endpoint": endpoint,
+    }
     steps: list[dict[str, Any]] = [{"id": "validate-endpoint", "status": "ok"}]
 
     core_version = runtime_core_version()
@@ -293,6 +495,7 @@ def doctor_report(
         except process_identity.ProcessIdentityError as exc:
             reason = "The requested Wwise host identity could not be verified"
             checks["identity"] = {"success": False, "pid": host_pid}
+            checks["host"] = {"success": False, "pid": host_pid, "executable": None}
             steps.append({"id": "bind-host-identity", "status": "failed", "message": reason})
             return _report(
                 checks,
@@ -300,10 +503,12 @@ def doctor_report(
                 EXIT_PREFLIGHT,
                 "host_identity",
                 reason,
+                [_host_pid_step(verb, reason)],
                 verb=verb,
                 failure_type=exc.failure_type,
             )
         checks["identity"] = identity_before.as_public_check(success=False)
+        checks["host"] = identity_before.as_public_check(success=False)
 
     runtime_version_reason: str | None = None
     runtime_version_failure_type: str | None = None
@@ -461,6 +666,7 @@ def doctor_report(
             "was supplied and independently observed"
         )
         checks["identity"] = {"success": False, "observed": False}
+        checks["host"] = {"success": False, "observed": False, "executable": None}
         steps.append({"id": "bind-host-identity", "status": "failed", "message": reason})
         return _report(
             checks,
@@ -468,20 +674,7 @@ def doctor_report(
             EXIT_PREFLIGHT,
             "host_identity",
             reason,
-            [
-                {
-                    "id": "supply-wwise-pid",
-                    "description": "Retry with the exact local Wwise Authoring PID",
-                    "command": [
-                        "dcc-mcp-wwise",
-                        verb,
-                        "--json",
-                        "--host-pid",
-                        "PID",
-                    ],
-                    "why": reason,
-                }
-            ],
+            [_host_pid_step(verb, reason)],
             verb=verb,
             failure_type="identity_unavailable",
         )
@@ -492,6 +685,7 @@ def doctor_report(
     except process_identity.ProcessIdentityError as exc:
         reason = "The Wwise host identity changed during the WAAPI probe"
         checks["identity"] = identity_before.as_public_check(success=False)
+        checks["host"] = identity_before.as_public_check(success=False)
         steps.append({"id": "recapture-host-identity", "status": "failed", "message": reason})
         return _report(
             checks,
@@ -499,12 +693,14 @@ def doctor_report(
             EXIT_PREFLIGHT,
             "host_identity",
             reason,
+            [_host_pid_step(verb, reason)],
             verb=verb,
             failure_type=exc.failure_type,
         )
     if time.monotonic() > deadline:
         reason = "The Wwise verification exceeded its deadline"
         checks["identity"] = identity_after.as_public_check(success=False)
+        checks["host"] = identity_after.as_public_check(success=False)
         steps.append({"id": "enforce-deadline", "status": "failed", "message": reason})
         return _report(
             checks,
@@ -516,5 +712,6 @@ def doctor_report(
             failure_type="timeout",
         )
     checks["identity"] = identity_after.as_public_check(success=True)
+    checks["host"] = identity_after.as_public_check(success=True)
     steps.append({"id": "recapture-host-identity", "status": "ok"})
     return _report(checks, steps, EXIT_OK, verb=verb)

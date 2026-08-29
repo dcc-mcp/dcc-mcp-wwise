@@ -11,6 +11,7 @@ def _fake_doctor_host_boundaries(monkeypatch):
 
     identity = process_identity.WwiseProcessIdentity(4321, "Wwise.exe", "start-1")
     monkeypatch.setattr(process_identity, "observe_wwise_process", lambda _pid: identity)
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.8.1")
 
     def in_process_get_info(url=None, *, timeout_secs=5.0):
         assert timeout_secs > 0
@@ -46,6 +47,182 @@ def test_install_contract_is_owned_by_formal_core_02014() -> None:
     assert not (
         Path(__file__).parents[1] / "src" / "dcc_mcp_wwise" / "install_contract.py"
     ).exists()
+
+
+def test_report_exposes_host_sdk_and_tool_floor_checks(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor, waapi
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+    code = cli.main(["verify", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert report["checks"]["host"] == {
+        "success": True,
+        "pid": 4321,
+        "executable": "Wwise.exe",
+        "started_at": "start-1",
+    }
+    assert report["checks"]["sdk"]["success"] is True
+    assert report["checks"]["sdk"]["minimum_version"] == doctor.MIN_WAAPI_CLIENT_VERSION
+    assert report["checks"]["tool"]["success"] is True
+    assert report["checks"]["tool"]["python_minimum"] == doctor.MIN_PYTHON_VERSION
+
+
+def test_report_fails_preflight_when_waapi_sdk_is_below_floor(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor
+
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.7.0")
+    code = cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_stage"] == "sdk"
+    assert report["checks"]["sdk"]["success"] is False
+    assert report["checks"]["sdk"]["version"] == "0.7.0"
+
+
+def test_report_fails_preflight_when_waapi_sdk_is_outside_supported_major(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor
+
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.9.0")
+    code = cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_stage"] == "sdk"
+    assert report["checks"]["sdk"]["success"] is False
+    assert report["checks"]["sdk"]["maximum_version_exclusive"] == "0.9"
+
+
+def test_report_accepts_pep440_post_release_sdk(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor, waapi
+
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.8.1.post1")
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+    code = cli.main(["verify", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert report["checks"]["sdk"]["success"] is True
+
+
+@pytest.mark.parametrize("timeout_ms", [0, 120001])
+def test_invalid_timeout_has_machine_executable_remediation(monkeypatch, capsys, timeout_ms):
+    from dcc_mcp_wwise import cli
+
+    code = cli.main(["doctor", "--json", "--timeout-ms", str(timeout_ms)])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["next_steps"]
+    assert report["next_steps"][0]["command"]
+
+
+def test_host_identity_failure_has_machine_executable_remediation(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity
+
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: (_ for _ in ()).throw(
+            process_identity.ProcessIdentityError("identity_unavailable")
+        ),
+    )
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_type"] == "identity_unavailable"
+    assert report["next_steps"][0]["command"]
+
+
+def test_missing_host_pid_emits_executable_pid_discovery_command(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+    code = cli.main(["verify", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    command = report["next_steps"][0]["command"]
+    assert code == 10
+    assert "PID" not in command
+    assert any("wwisePid" in part or "wwise_pid" in part for part in command)
+    assert all("Select-Object -First 1" not in part for part in command)
+    assert all("head -n 1" not in part for part in command)
+    assert any("Read-Host" in part or "read -r" in part for part in command)
+    assert any("Count -gt 1" in part or "-gt 1" in part for part in command)
+
+
+def test_posix_pid_discovery_command_is_formatted_without_percent_errors(monkeypatch):
+    from dcc_mcp_wwise import doctor
+
+    monkeypatch.setattr(doctor.os, "name", "posix")
+    command = doctor._host_pid_command("verify")
+    assert command[:2] == ["sh", "-lc"]
+    assert "printf '%s\\n'" in command[2]
+    assert "read -r wwise_pid" in command[2]
+
+
+def test_unknown_failure_type_is_normalized_to_closed_enum(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity
+
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: (_ for _ in ()).throw(process_identity.ProcessIdentityError("bogus")),
+    )
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_type"] == "unknown_failure"
+
+
+def test_missing_result_failure_type_remains_stable(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    monkeypatch.setattr(
+        waapi,
+        "get_wwise_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            waapi.WaapiCallError(
+                "probe returned no result",
+                failure_stage="protocol",
+                failure_type="missing_result",
+            )
+        ),
+    )
+    code = cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 40
+    assert report["verify"]["failure_type"] == "missing_result"
 
 
 def test_public_report_validates_with_the_packaged_core_schema() -> None:
@@ -132,6 +309,7 @@ def test_public_doctor_classifies_deadline_without_raw_details(monkeypatch, caps
     assert report["verify"]["directly_usable"] is False
     assert report["verify"]["failure_stage"] == "deadline"
     assert report["verify"]["failure_type"] == "timeout"
+    assert report["next_steps"][0]["command"]
     assert "token" not in captured.out
     assert "certificate" not in captured.out
 
@@ -281,6 +459,7 @@ def test_explicit_wrong_executable_fails_before_waapi_io(monkeypatch, capsys):
     assert code == 10
     assert report["verify"]["failure_stage"] == "host_identity"
     assert report["verify"]["failure_type"] == "identity_mismatch"
+    assert report["next_steps"][0]["command"]
 
 
 def test_pid_reuse_during_get_info_fails_closed(monkeypatch, capsys):
@@ -308,6 +487,7 @@ def test_pid_reuse_during_get_info_fails_closed(monkeypatch, capsys):
     assert report["verify"]["directly_usable"] is False
     assert report["verify"]["failure_stage"] == "host_identity"
     assert report["verify"]["failure_type"] == "identity_mismatch"
+    assert report["next_steps"][0]["command"]
 
 
 def test_doctor_rejects_a_remote_endpoint_outside_the_operator_allowlist(monkeypatch, capsys):

@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
   "dcc-mcp-core>=0.20.14,<1.0.0",
+  "packaging>=24,<27",
   "waapi-client>=0.8.1,<0.9",
 ]
 

@@ -359,6 +359,7 @@ version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "dcc-mcp-core" },
+    { name = "packaging" },
     { name = "waapi-client" },
 ]
 
@@ -376,6 +377,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
     { name = "dcc-mcp-core", specifier = ">=0.20.14,<1.0.0" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.17,<5" },
+    { name = "packaging", specifier = ">=24,<27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=6" },

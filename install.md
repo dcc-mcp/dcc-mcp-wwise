@@ -107,8 +107,11 @@ dcc-mcp-wwise verify --json --host-pid PID --timeout-ms 5000
 ```
 
 Both verbs validate endpoint syntax and port, loopback/remote allowlist policy,
-Core version, WAAPI enablement, the live typed runtime response, and the actual
-Wwise version. Their stable exits are:
+Python/tool and `waapi-client` SDK floors, Core version, WAAPI enablement, the
+live typed runtime response, and the actual Wwise version. The JSON report keeps
+these checks separate under `checks.config`, `checks.tool`, `checks.sdk`,
+`checks.endpoint`, `checks.host`, and `checks.runtime`; every report includes
+`verify.directly_usable` and machine-executable `next_steps` remediation. Their stable exits are:
 
 - `0`: the local loopback typed WAAPI probe passed and `directly_usable` is true;
 - `10`: endpoint, allowlist, enablement, Core, Wwise-version, or host-binding
