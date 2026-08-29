@@ -23,6 +23,7 @@ from dcc_mcp_core.deployment import (
 from dcc_mcp_core.deployment import (
     INSTALL_SOP_SCHEMA_VERSION as SCHEMA_VERSION,
 )
+from packaging.version import InvalidVersion, Version
 
 from . import process_identity, waapi
 from .__version__ import __version__
@@ -40,6 +41,18 @@ _RUNTIME_VERSION = re.compile(
     r"(0|[1-9][0-9]{0,8})\."
     r"(0|[1-9][0-9]{0,8})\Z"
 )
+_FAILURE_TYPES = {
+    "configuration": "configuration_failed",
+    "endpoint_allowlist": "endpoint_not_allowed",
+    "core": "core_version_unsupported",
+    "sdk": "sdk_version_unsupported",
+    "tool": "python_version_unsupported",
+    "wwise_version": "wwise_version_unsupported",
+    "waapi_enablement": "connection_failed",
+    "runtime": "rpc_failed",
+    "deadline": "timeout",
+    "host_identity": "identity_unavailable",
+}
 
 
 class _RuntimeVersionError(waapi.WaapiCallError):
@@ -77,34 +90,32 @@ def waapi_client_version() -> str | None:
         return None
 
 
-def _version_tuple(value: str | None) -> tuple[int, ...] | None:
+def _pep440_version(value: str | None) -> Version | None:
     if not isinstance(value, str) or not value.strip():
         return None
     normalized = value.strip()
     if len(normalized) > _MAX_VERSION_LENGTH:
         return None
-    parts = normalized.split(".")
-    if any(not part.isdigit() for part in parts):
+    try:
+        return Version(normalized)
+    except InvalidVersion:
         return None
-    return tuple(int(part) for part in parts)
 
 
 def _at_least(version: str | None, minimum: str) -> bool:
-    actual = _version_tuple(version)
-    expected = _version_tuple(minimum)
+    actual = _pep440_version(version)
+    expected = _pep440_version(minimum)
     if actual is None or expected is None:
         return False
-    width = max(len(actual), len(expected))
-    return (actual + (0,) * (width - len(actual))) >= (expected + (0,) * (width - len(expected)))
+    return actual >= expected
 
 
 def _below(version: str | None, maximum: str) -> bool:
-    actual = _version_tuple(version)
-    expected = _version_tuple(maximum)
+    actual = _pep440_version(version)
+    expected = _pep440_version(maximum)
     if actual is None or expected is None:
         return False
-    width = max(len(actual), len(expected))
-    return (actual + (0,) * (width - len(actual))) < (expected + (0,) * (width - len(expected)))
+    return actual < expected
 
 
 def _tool_checks() -> dict[str, Any]:
@@ -190,6 +201,18 @@ def _report(
     failure_type: str | None = None,
 ) -> dict[str, Any]:
     directly_usable = exit_code == EXIT_OK
+    public_failure_type = failure_type or _FAILURE_TYPES.get(failure_stage or "")
+    public_next_steps = list(next_steps or ())
+    if not directly_usable and not public_next_steps:
+        retry_verb = verb if verb in {"doctor", "verify"} else "doctor"
+        public_next_steps = [
+            {
+                "id": "retry-%s" % retry_verb,
+                "description": "Retry the typed Wwise %s verification" % retry_verb,
+                "command": ["dcc-mcp-wwise", retry_verb, "--json"],
+                "why": failure_reason or "The verification did not complete",
+            }
+        ]
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ok" if directly_usable else "failed",
@@ -199,13 +222,13 @@ def _report(
         "core_version": runtime_core_version(),
         "checks": checks,
         "steps": steps,
-        "next_steps": list(next_steps or ()),
+        "next_steps": public_next_steps,
         "receipt_path": None,
         "verify": {
             "directly_usable": directly_usable,
             "failure_stage": failure_stage,
             "failure_reason": failure_reason,
-            "failure_type": failure_type,
+            "failure_type": public_failure_type,
         },
         "_exit_code": exit_code,
     }

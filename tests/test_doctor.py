@@ -103,6 +103,57 @@ def test_report_fails_preflight_when_waapi_sdk_is_outside_supported_major(monkey
     assert report["checks"]["sdk"]["maximum_version_exclusive"] == "0.9"
 
 
+def test_report_accepts_pep440_post_release_sdk(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, doctor, waapi
+
+    monkeypatch.setattr(doctor, "waapi_client_version", lambda: "0.8.1.post1")
+
+    class HealthyWaapiClient:
+        def __init__(self, _url, allow_exception):
+            assert allow_exception is True
+
+        def call(self, uri, arguments, options):
+            assert (uri, arguments, options) == ("ak.wwise.core.getInfo", {}, {})
+            return {"version": {"displayName": "2024.1.1.8691"}}
+
+        def disconnect(self):
+            return True
+
+    monkeypatch.setattr(waapi, "_client_type", lambda: HealthyWaapiClient)
+    code = cli.main(["verify", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert report["checks"]["sdk"]["success"] is True
+
+
+@pytest.mark.parametrize("timeout_ms", [0, 120001])
+def test_invalid_timeout_has_machine_executable_remediation(monkeypatch, capsys, timeout_ms):
+    from dcc_mcp_wwise import cli
+
+    code = cli.main(["doctor", "--json", "--timeout-ms", str(timeout_ms)])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["next_steps"]
+    assert report["next_steps"][0]["command"]
+
+
+def test_host_identity_failure_has_machine_executable_remediation(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, process_identity
+
+    monkeypatch.setattr(
+        process_identity,
+        "observe_wwise_process",
+        lambda _pid: (_ for _ in ()).throw(
+            process_identity.ProcessIdentityError("identity_unavailable")
+        ),
+    )
+    code = cli.main(["doctor", "--json", "--host-pid", "4321"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 10
+    assert report["verify"]["failure_type"] == "identity_unavailable"
+    assert report["next_steps"][0]["command"]
+
+
 def test_public_report_validates_with_the_packaged_core_schema() -> None:
     from dcc_mcp_core.deployment import load_install_sop_schema
     from jsonschema import Draft202012Validator
@@ -187,6 +238,7 @@ def test_public_doctor_classifies_deadline_without_raw_details(monkeypatch, caps
     assert report["verify"]["directly_usable"] is False
     assert report["verify"]["failure_stage"] == "deadline"
     assert report["verify"]["failure_type"] == "timeout"
+    assert report["next_steps"][0]["command"]
     assert "token" not in captured.out
     assert "certificate" not in captured.out
 
@@ -336,6 +388,7 @@ def test_explicit_wrong_executable_fails_before_waapi_io(monkeypatch, capsys):
     assert code == 10
     assert report["verify"]["failure_stage"] == "host_identity"
     assert report["verify"]["failure_type"] == "identity_mismatch"
+    assert report["next_steps"][0]["command"]
 
 
 def test_pid_reuse_during_get_info_fails_closed(monkeypatch, capsys):
@@ -363,6 +416,7 @@ def test_pid_reuse_during_get_info_fails_closed(monkeypatch, capsys):
     assert report["verify"]["directly_usable"] is False
     assert report["verify"]["failure_stage"] == "host_identity"
     assert report["verify"]["failure_type"] == "identity_mismatch"
+    assert report["next_steps"][0]["command"]
 
 
 def test_doctor_rejects_a_remote_endpoint_outside_the_operator_allowlist(monkeypatch, capsys):
