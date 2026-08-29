@@ -175,6 +175,10 @@ def test_missing_host_pid_emits_executable_pid_discovery_command(monkeypatch, ca
     assert code == 10
     assert "PID" not in command
     assert any("wwisePid" in part or "wwise_pid" in part for part in command)
+    assert all("Select-Object -First 1" not in part for part in command)
+    assert all("head -n 1" not in part for part in command)
+    assert any("Read-Host" in part or "read -r" in part for part in command)
+    assert any("Count -gt 1" in part or "-gt 1" in part for part in command)
 
 
 def test_unknown_failure_type_is_normalized_to_closed_enum(monkeypatch, capsys):
@@ -189,6 +193,26 @@ def test_unknown_failure_type_is_normalized_to_closed_enum(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert code == 10
     assert report["verify"]["failure_type"] == "unknown_failure"
+
+
+def test_missing_result_failure_type_remains_stable(monkeypatch, capsys):
+    from dcc_mcp_wwise import cli, waapi
+
+    monkeypatch.setattr(
+        waapi,
+        "get_wwise_info",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            waapi.WaapiCallError(
+                "probe returned no result",
+                failure_stage="protocol",
+                failure_type="missing_result",
+            )
+        ),
+    )
+    code = cli.main(["doctor", "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 40
+    assert report["verify"]["failure_type"] == "missing_result"
 
 
 def test_public_report_validates_with_the_packaged_core_schema() -> None:

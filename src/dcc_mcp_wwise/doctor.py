@@ -64,6 +64,7 @@ _STABLE_FAILURE_TYPES = frozenset(
         "identity_unavailable",
         "identity_mismatch",
         "timeout",
+        "missing_result",
         "unknown_failure",
     }
 )
@@ -168,16 +169,25 @@ def _config_checks(url: str | None = None) -> dict[str, Any]:
 
 
 def _host_pid_command(verb: str) -> list[str]:
-    """Build a safe, executable command that discovers and binds one Wwise PID."""
+    """Build an executable command that requires unambiguous Wwise PID selection."""
     if os.name == "nt":
         script = (
-            "$wwisePid = (Get-Process -Name Wwise -ErrorAction Stop | "
-            "Select-Object -First 1 -ExpandProperty Id); "
+            "$wwise = @(Get-Process -Name Wwise -ErrorAction SilentlyContinue); "
+            "if ($wwise.Count -eq 0) { throw 'No Wwise Authoring process found' }; "
+            "if ($wwise.Count -gt 1) { $wwise | Select-Object Id,MainWindowTitle | "
+            "Format-Table | Out-Host; $wwisePid = [int](Read-Host 'Enter exact Wwise PID') } "
+            "else { $wwisePid = $wwise[0].Id }; "
+            "if (@($wwise.Id) -notcontains $wwisePid) { "
+            "throw 'Selected PID is not a Wwise process' }; "
             "& dcc-mcp-wwise %s --json --host-pid $wwisePid" % verb
         )
         return ["powershell", "-NoProfile", "-Command", script]
     script = (
-        "wwise_pid=$(pgrep -x Wwise | head -n 1) && "
+        "wwise_pids=($(pgrep -x Wwise || true)); "
+        "if [ ${#wwise_pids[@]} -eq 0 ]; then "
+        "echo 'No Wwise Authoring process found' >&2; exit 10; fi; "
+        "if [ ${#wwise_pids[@]} -gt 1 ]; then printf '%s\\n' \"${wwise_pids[@]}\"; "
+        'read -r wwise_pid; else wwise_pid="${wwise_pids[0]}"; fi; '
         'exec dcc-mcp-wwise %s --json --host-pid "$wwise_pid"' % verb
     )
     return ["sh", "-lc", script]
