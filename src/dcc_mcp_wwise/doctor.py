@@ -183,11 +183,17 @@ def _host_pid_command(verb: str) -> list[str]:
         )
         return ["powershell", "-NoProfile", "-Command", script]
     script = (
-        "wwise_pids=($(pgrep -x Wwise || true)); "
-        "if [ ${#wwise_pids[@]} -eq 0 ]; then "
+        'wwise_pids="$(pgrep -x Wwise || true)"; '
+        'wwise_count="$(printf \'%%s\\n\' "$wwise_pids" | '
+        "awk 'NF { n++ } END { print n + 0 }')\"; "
+        'if [ "$wwise_count" -eq 0 ]; then '
         "echo 'No Wwise Authoring process found' >&2; exit 10; fi; "
-        "if [ ${#wwise_pids[@]} -gt 1 ]; then printf '%%s\\n' \"${wwise_pids[@]}\"; "
-        'read -r wwise_pid; else wwise_pid="${wwise_pids[0]}"; fi; '
+        'if [ "$wwise_count" -gt 1 ]; then printf \'%%s\\n\' "$wwise_pids"; '
+        "printf 'Enter exact Wwise PID: '; read -r wwise_pid; else wwise_pid=\"$wwise_pids\"; fi; "
+        "wwise_match=0; for candidate in $wwise_pids; do "
+        '[ "$candidate" = "$wwise_pid" ] && wwise_match=1; done; '
+        'if [ "$wwise_match" -ne 1 ]; then '
+        "echo 'Selected PID is not a Wwise process' >&2; exit 10; fi; "
         'exec dcc-mcp-wwise %s --json --host-pid "$wwise_pid"' % verb
     )
     return ["sh", "-lc", script]
