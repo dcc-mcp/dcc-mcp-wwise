@@ -223,9 +223,11 @@ jobs:
       - name: Install archive verification dependencies
         # tools/verify_release_archives.py imports the package under test, so
         # the runtime closure from project.dependencies has to resolve before
-        # the immutable identity check runs.
+        # the immutable identity check runs. Pinned to the audited uv.lock
+        # versions and restricted to wheels: this job holds id-token: write, so
+        # it must not resolve a new version or build an sdist from the registry.
         run: |
-          python -m pip install "dcc-mcp-core>=0.20.14,<1.0.0" "waapi-client>=0.8.1,<0.9" "packaging>=24,<27"
+          python -m pip install --only-binary :all:             "dcc-mcp-core==0.20.14" "waapi-client==0.8.1" "packaging==26.2"
       - name: Recapture exact artifact provenance before download
         env:
           GH_HOST: github.com
@@ -329,9 +331,11 @@ jobs:
       - name: Install archive verification dependencies
         # tools/verify_release_archives.py imports the package under test, so
         # the runtime closure from project.dependencies has to resolve before
-        # the immutable identity check runs.
+        # the immutable identity check runs. Pinned to the audited uv.lock
+        # versions and restricted to wheels: this job holds id-token: write, so
+        # it must not resolve a new version or build an sdist from the registry.
         run: |
-          python -m pip install "dcc-mcp-core>=0.20.14,<1.0.0" "waapi-client>=0.8.1,<0.9" "packaging>=24,<27"
+          python -m pip install --only-binary :all:             "dcc-mcp-core==0.20.14" "waapi-client==0.8.1" "packaging==26.2"
       - name: Recapture exact artifact provenance before download
         env:
           GH_HOST: github.com
