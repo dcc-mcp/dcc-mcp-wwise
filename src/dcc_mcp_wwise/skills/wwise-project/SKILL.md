@@ -7,7 +7,7 @@ metadata:
   dcc-mcp:
     dcc: wwise
     layer: domain
-    version: "0.1.4"  # x-release-please-version
+    version: "0.1.5"  # x-release-please-version
     tags: [wwise, waapi, audio, project]
     search-hint: "Wwise WAAPI project query runtime Sound Engine remote connect profiler capture voices SoundBank ProjectInfo reconcile Unity Unreal Work Unit source control checkout commit save"
     tools: tools.yaml
