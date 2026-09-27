@@ -217,6 +217,13 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag_name }}
           fetch-depth: 1
           persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Install the runtime imports the archive smoke test needs
+        run: >-
+          python -m pip install "packaging>=24,<27" "waapi-client>=0.8.1,<0.9"
+          "dcc-mcp-core==0.20.14"
       - name: Recapture exact artifact provenance before download
         env:
           GH_HOST: github.com
