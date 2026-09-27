@@ -533,7 +533,7 @@ def test_recovery_pypi_is_bound_to_the_new_artifact_and_idempotent_exact_files()
         "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
     )
     assert publisher["with"] == {
-        "packages-dir": "pypi-dist",
+        "packages-dir": "publish-dist",
         "verbose": True,
         "print-hash": True,
     }
@@ -712,7 +712,10 @@ def test_publication_consumers_use_object_bound_handoffs() -> None:
         )
         assert "--snapshot-dir pypi-staging" in runs
         assert "--readonly-bind-dir pypi-dist" in runs
-        assert publication["with"]["packages-dir"] == "pypi-dist"
+        # The publisher writes <dist>.publish.attestation beside each file, so it
+        # must publish from a writable copy of the read-only verified export.
+        assert publication["with"]["packages-dir"] == "publish-dist"
+        assert "cp -a pypi-dist/. publish-dist/" in runs
 
     for job_name in ("attach-release-assets", "recovery-attach-release-assets"):
         runs = "\n".join(str(step.get("run", "")) for step in workflow["jobs"][job_name]["steps"])
