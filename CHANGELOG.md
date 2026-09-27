@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.5](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.4...v0.1.5) (2026-08-29)
+
+
+### Bug Fixes
+
+* bind recovery archive smoke paths ([92d1b28](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/92d1b287f7c9a45270d94ae5cdae9b5a64296650))
+* bind release archive snapshots ([c59aeb0](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/c59aeb02e88f521b896c8944a8685240ff4f981d))
+* bind verified release artifacts to consumers ([1e69a03](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/1e69a03ea2eb50b5157a608a1acc0fdb141f6f4c))
+* bootstrap recovery validation dependency ([c73a378](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/c73a378688c1245c3cee2230e5a9f6c27fcdc8da))
+* complete Wwise install doctor contract ([#21](https://github.com/dcc-mcp/dcc-mcp-wwise/issues/21)) ([632fa97](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/632fa9751fc43e3313f938d2dd351693fcc0c6e7))
+* recover v0.1.4 publication ([1f78e35](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/1f78e359febdabff0969698e13ce9eedd0779236))
+
 ## [0.1.4](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.3...v0.1.4) (2026-08-27)
 
 
