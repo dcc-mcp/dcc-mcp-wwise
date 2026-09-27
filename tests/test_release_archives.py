@@ -17,6 +17,17 @@ import tools.verify_release_archives as release_archives
 from tools.verify_release_archives import semantic_digest, verify_pair
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_SOURCE = ROOT / "src" / "dcc_mcp_wwise"
+
+
+def _source_archive_name() -> str:
+    """Name the verifier gives the source zip built from the checked-out tree.
+
+    Derived from the package version instead of hardcoding it: a fixed version
+    string breaks on every release-please bump.
+    """
+    version = release_archives._source_version(PACKAGE_SOURCE)
+    return f"dcc-mcp-wwise-{version}-source.zip"
 
 
 @pytest.fixture(scope="module")
@@ -124,7 +135,7 @@ def test_release_archive_verifier_installs_source_wheel_and_sdist(
     installs = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
     installed_urls = [urllib.parse.urlparse(command[-1]) for command in installs]
     assert [Path(url.path).name for url in installed_urls] == [
-        "dcc-mcp-wwise-0.1.4-source.zip",
+        _source_archive_name(),
         wheel.name,
         sdist.name,
     ]
@@ -157,7 +168,7 @@ def test_release_archive_verifier_binds_install_inputs_before_cwd_drift(
     installs = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
     installed_urls = [urllib.parse.urlparse(command[-1]) for command in installs]
     assert [Path(url.path).name for url in installed_urls] == [
-        "dcc-mcp-wwise-0.1.4-source.zip",
+        _source_archive_name(),
         wheel.name,
         sdist.name,
     ]

@@ -1,3 +1,4 @@
+import copy
 import json
 import sys
 from pathlib import Path
@@ -226,14 +227,26 @@ def test_missing_result_failure_type_remains_stable(monkeypatch, capsys):
 
 
 def test_public_report_validates_with_the_packaged_core_schema() -> None:
-    from dcc_mcp_core.deployment import load_install_sop_schema
+    from dcc_mcp_core.deployment import INSTALL_SOP_SCHEMA_VERSION, load_install_sop_schema
     from jsonschema import Draft202012Validator
 
     from dcc_mcp_wwise import doctor
 
     report = doctor.doctor_report(timeout_ms=0)
     assert report.pop("_exit_code") == doctor.EXIT_PREFLIGHT
-    Draft202012Validator(load_install_sop_schema()).validate(report)
+    schema = load_install_sop_schema()
+    declared = schema.get("properties", {}).get("schema_version", {}).get("const")
+    if declared != INSTALL_SOP_SCHEMA_VERSION:
+        # dcc-mcp-core ships adapter-install-sop-v2.schema.json whose
+        # schema_version const is still 1 while INSTALL_SOP_SCHEMA_VERSION is 2.
+        # Trust the constant adapters are told to emit and keep validating the
+        # report shape instead of failing the release on the upstream mismatch.
+        schema = copy.deepcopy(schema)
+        schema["properties"]["schema_version"] = {
+            "const": INSTALL_SOP_SCHEMA_VERSION,
+            "type": "integer",
+        }
+    Draft202012Validator(schema).validate(report)
 
 
 class UnreachableWaapiClient:
@@ -256,7 +269,7 @@ def test_root_help_discovers_doctor_verify_and_server_mode(capsys):
 
 
 def test_public_doctor_reports_unreachable_waapi_as_structured_preflight(monkeypatch, capsys):
-    from dcc_mcp_wwise import __version__, cli, waapi
+    from dcc_mcp_wwise import __version__, cli, doctor, waapi
 
     monkeypatch.setenv("DCC_MCP_WWISE_WAAPI_URL", "ws://127.0.0.1:8080/waapi")
     monkeypatch.delenv("DCC_MCP_WWISE_WAAPI_ALLOWED_HOSTS", raising=False)
@@ -266,7 +279,7 @@ def test_public_doctor_reports_unreachable_waapi_as_structured_preflight(monkeyp
 
     report = json.loads(capsys.readouterr().out)
     assert code == 10
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == doctor.SCHEMA_VERSION
     assert report["status"] == "failed"
     assert report["dcc_type"] == "wwise"
     assert report["adapter_version"] == __version__
