@@ -291,10 +291,19 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > artifact.json
           python scripts/ci/release_integrity.py artifact artifact.json --id "$ARTIFACT_ID" --name "python-dist-$TAG_NAME-$GITHUB_RUN_ID" --sha256 "$ARTIFACT_DIGEST" --run-id "$GITHUB_RUN_ID" --repository-id "$GITHUB_REPOSITORY_ID" --head-sha "$VERIFIED_SOURCE_SHA"
           (cd pypi-dist && sha256sum --check ../release-bundle/SHA256SUMS)
+      - name: Stage the verified distributions for publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf publish-dist
+          mkdir -p publish-dist
+          cp -a pypi-dist/. publish-dist/
+          test "$(find publish-dist -maxdepth 1 -type f | wc -l)" -eq 2
+          (cd publish-dist && sha256sum --check ../release-bundle/SHA256SUMS)
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          packages-dir: pypi-dist
+          packages-dir: publish-dist
           verbose: true
           print-hash: true
 
@@ -610,11 +619,20 @@ jobs:
             exit 1
           fi
           (cd pypi-dist && sha256sum --check ../release-bundle/SHA256SUMS)
+      - name: Stage the verified recovery distributions for publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf publish-dist
+          mkdir -p publish-dist
+          cp -a pypi-dist/. publish-dist/
+          test "$(find publish-dist -maxdepth 1 -type f | wc -l)" -eq 2
+          (cd publish-dist && sha256sum --check ../release-bundle/SHA256SUMS)
       - name: Publish recovery distributions with Trusted Publishing
         if: steps.identity.outputs.publish_required == 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
-          packages-dir: pypi-dist
+          packages-dir: publish-dist
           verbose: true
           print-hash: true
 
