@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.5...v0.1.6) (2026-09-28)
+
+
+### Bug Fixes
+
+* **ci:** pin the archive verification dependencies in the publish jobs ([42f4ce3](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/42f4ce322a29f7bb8d33e64d106cce66a7478f80))
+
 ## [0.1.5](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.4...v0.1.5) (2026-09-27)
 
 
