@@ -20,13 +20,50 @@ from dcc_mcp_core.deployment import (
 from dcc_mcp_core.deployment import (
     INSTALL_EXIT_VERIFY as EXIT_VERIFY,
 )
-from dcc_mcp_core.deployment import (
-    INSTALL_SOP_SCHEMA_VERSION as SCHEMA_VERSION,
-)
 from packaging.version import InvalidVersion, Version
 
 from . import process_identity, waapi
 from .__version__ import __version__
+
+try:
+    # Core 0.20.40 added this function, which answers the only question this
+    # module actually has: what must a report's `schema_version` carry? It is
+    # kept optional because the declared core floor is older than 0.20.40 and a
+    # hard import would make the doctor unimportable on every core below it.
+    from dcc_mcp_core.deployment import install_sop_report_schema_version
+except ImportError:  # Core older than 0.20.40
+    install_sop_report_schema_version = None
+
+# Last-resort value for the report's own `schema_version` field, used only when
+# Core cannot answer the question itself. It is deliberately NOT the revision of
+# Core's published schema *artifact* (`INSTALL_SOP_SCHEMA_REVISION`, 2 since Core
+# 0.20.36): that counter names the artifact, while this field is pinned by the
+# artifact at `properties.schema_version.const` and stays at 1 because revisions
+# only add optional members. The two coincided at 1 through Core 0.20.33, which
+# is why copying the artifact revision into the report looked correct right up
+# until 0.20.34 republished it as `-v2`.
+FALLBACK_REPORT_SCHEMA_VERSION = 1
+
+
+def _report_schema_version() -> int:
+    """Return the value every report's ``schema_version`` field must carry.
+
+    Core answers this directly from 0.20.40 on; older cores in the declared
+    range never moved the value off 1, so the fallback is safe for both.
+
+    A core that cannot read its own schema document still has to let the doctor
+    emit the report it was about to print, so that failure falls through to the
+    constant instead of propagating.
+    """
+    if install_sop_report_schema_version is not None:
+        try:
+            return int(install_sop_report_schema_version())
+        except (RuntimeError, OSError, ValueError):
+            pass
+    return FALLBACK_REPORT_SCHEMA_VERSION
+
+
+SCHEMA_VERSION = _report_schema_version()
 
 MIN_CORE_VERSION = "0.20.14"
 MIN_WWISE_VERSION = "2024.1"

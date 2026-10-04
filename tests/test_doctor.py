@@ -1,4 +1,3 @@
-import copy
 import json
 import sys
 from pathlib import Path
@@ -31,14 +30,17 @@ def test_install_contract_is_owned_by_formal_core_02014() -> None:
         INSTALL_EXIT_OK,
         INSTALL_EXIT_PREFLIGHT,
         INSTALL_EXIT_VERIFY,
-        INSTALL_SOP_SCHEMA_VERSION,
         load_install_sop_schema,
     )
 
     from dcc_mcp_wwise import doctor
 
     assert doctor.MIN_CORE_VERSION == "0.20.14"
-    assert doctor.SCHEMA_VERSION == INSTALL_SOP_SCHEMA_VERSION
+    # The report field tracks the const the published schema pins, not the
+    # revision of the schema *artifact*: the two are separate counters.
+    assert (
+        doctor.SCHEMA_VERSION == load_install_sop_schema()["properties"]["schema_version"]["const"]
+    )
     assert (doctor.EXIT_OK, doctor.EXIT_PREFLIGHT, doctor.EXIT_VERIFY) == (
         INSTALL_EXIT_OK,
         INSTALL_EXIT_PREFLIGHT,
@@ -227,26 +229,18 @@ def test_missing_result_failure_type_remains_stable(monkeypatch, capsys):
 
 
 def test_public_report_validates_with_the_packaged_core_schema() -> None:
-    from dcc_mcp_core.deployment import INSTALL_SOP_SCHEMA_VERSION, load_install_sop_schema
+    from dcc_mcp_core.deployment import load_install_sop_schema
     from jsonschema import Draft202012Validator
 
     from dcc_mcp_wwise import doctor
 
     report = doctor.doctor_report(timeout_ms=0)
     assert report.pop("_exit_code") == doctor.EXIT_PREFLIGHT
-    schema = load_install_sop_schema()
-    declared = schema.get("properties", {}).get("schema_version", {}).get("const")
-    if declared != INSTALL_SOP_SCHEMA_VERSION:
-        # dcc-mcp-core ships adapter-install-sop-v2.schema.json whose
-        # schema_version const is still 1 while INSTALL_SOP_SCHEMA_VERSION is 2.
-        # Trust the constant adapters are told to emit and keep validating the
-        # report shape instead of failing the release on the upstream mismatch.
-        schema = copy.deepcopy(schema)
-        schema["properties"]["schema_version"] = {
-            "const": INSTALL_SOP_SCHEMA_VERSION,
-            "type": "integer",
-        }
-    Draft202012Validator(schema).validate(report)
+    # No schema rewriting here: the report now carries the const the packaged
+    # schema pins, so the document validates as published. Re-loosening the
+    # schema to accept the artifact revision would re-hide the defect this
+    # guards against.
+    Draft202012Validator(load_install_sop_schema()).validate(report)
 
 
 class UnreachableWaapiClient:
