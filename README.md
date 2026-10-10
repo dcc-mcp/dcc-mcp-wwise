@@ -30,7 +30,7 @@ _Illustrative workflow generated with OpenAI ImageGen from the retained source i
 **dcc-mcp-wwise** — Audiokinetic Wwise Authoring adapter with typed WAAPI project,
 audio, SoundBank, and profiler workflows.
 
-It is one of **38 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
+It is one of **47 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
 MCP protocol and builds on the same core runtime contract; each one exposes the tools
 its own host needs on top of that.
 
