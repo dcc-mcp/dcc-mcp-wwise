@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.7](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.6...v0.1.7) (2026-10-09)
+
+
+### Bug Fixes
+
+* stamp the report schema version Core pins, not the artifact revision ([f1e81ce](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/f1e81cedd07f03d6dba6df4ec71aa854feb29ce7))
+
+
+### Documentation
+
+* **readme:** add the generated DCC-MCP host matrix pointer ([#40](https://github.com/dcc-mcp/dcc-mcp-wwise/issues/40)) ([409280b](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/409280bc1dd12267472bd546097b68e4b201d803))
+
 ## [0.1.6](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.5...v0.1.6) (2026-09-28)
 
 
