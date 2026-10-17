@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.7...v0.1.8) (2026-10-12)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([1bf4040](https://github.com/dcc-mcp/dcc-mcp-wwise/commit/1bf4040e197f711a840ba3d5d34f400baf328e5f))
+
 ## [0.1.7](https://github.com/dcc-mcp/dcc-mcp-wwise/compare/v0.1.6...v0.1.7) (2026-10-09)
 
 
